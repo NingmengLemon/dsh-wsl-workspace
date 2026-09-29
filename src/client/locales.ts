@@ -17,6 +17,7 @@ export const zh: Record<string, string> = {
   'dialog.username': '用户名',
   'dialog.usernamePlaceholder': '留空则使用发行版默认用户',
   'dialog.loading': '正在加载…',
+  'dialog.noDistros': '无可用发行版',
   'dialog.browseEmpty': '此目录没有子文件夹',
   'dialog.upLevel': '..（返回上级）',
   'dialog.browse': '浏览',
@@ -26,6 +27,7 @@ export const zh: Record<string, string> = {
   'dialog.retry': '重试',
 
   'error.loadDistros': '无法获取 WSL 发行版列表，请确认已安装 WSL 且插件宿主端可用',
+  'error.noDistros': '没有检测到任何 WSL 发行版。请先安装一个（例如 wsl --install -d Debian），再重新打开此对话框。',
   'error.rateLimited': '操作过于频繁，请稍后重试',
   'error.loadDir': '无法浏览该目录',
   'error.presetMissing': '未找到健康的 wsl preset，请确认插件宿主端已安装并配置该 preset',
@@ -65,6 +67,7 @@ export const en: Record<string, string> = {
   'dialog.username': 'Username',
   'dialog.usernamePlaceholder': 'Leave empty to use the distro default user',
   'dialog.loading': 'Loading…',
+  'dialog.noDistros': 'no distribution available',
   'dialog.browseEmpty': 'No subdirectories here',
   'dialog.upLevel': '.. (up)',
   'dialog.browse': 'Browse',
@@ -74,6 +77,7 @@ export const en: Record<string, string> = {
   'dialog.retry': 'Retry',
 
   'error.loadDistros': 'Could not list WSL distros; confirm WSL is installed and the plugin host side is reachable',
+  'error.noDistros': 'No WSL distribution was found. Install one first (for example `wsl --install -d Debian`), then reopen this dialog.',
   'error.rateLimited': 'Too many attempts; retry in a moment',
   'error.loadDir': 'Could not browse this directory',
   'error.presetMissing': 'No healthy "wsl" preset found; confirm the plugin host side installed and configured it',

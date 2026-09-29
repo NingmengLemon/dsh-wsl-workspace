@@ -150,7 +150,12 @@ export function AddWslWorkspace({ wide, t, describe, checkPreset, listDistros, l
       // The default browse root walks from `/`; the input defaults to `/home/`.
       setBrowsing(true)
       setOpening(false)
-      if (presetIssue !== undefined) setError(presetIssue)
+      // An empty list is a *successful* read, so the catch above cannot report
+      // it. Without this the picker renders a single blank option, the dialog
+      // looks ready, and the first thing the user hears about it is the path
+      // error that an empty distro produces one step later.
+      if (first === '') setError(t('error.noDistros'))
+      else if (presetIssue !== undefined) setError(presetIssue)
       if (first !== '') void refreshBrowse('/', first)
     })()
     return () => { cancelled = true }
@@ -303,7 +308,7 @@ export function AddWslWorkspace({ wide, t, describe, checkPreset, listDistros, l
               onChange={event => onDistroChange(event.target.value)}
             >
               {distros.length === 0
-                ? <option value="">{opening ? t('dialog.loading') : ''}</option>
+                ? <option value="">{opening ? t('dialog.loading') : t('dialog.noDistros')}</option>
                 : distros.map(name => <option key={name} value={name}>{name}</option>)}
             </select>
           </div>
@@ -318,7 +323,7 @@ export function AddWslWorkspace({ wide, t, describe, checkPreset, listDistros, l
                 disabled={opening || busy}
                 onChange={event => setPathInput(event.target.value)}
               />
-              <button type="button" className="dww-check-btn" disabled={opening || busy} onClick={() => void onCheck()}>
+              <button type="button" className="dww-check-btn" disabled={opening || busy || distro === ''} onClick={() => void onCheck()}>
                 {t('dialog.check')}
               </button>
             </div>
@@ -363,7 +368,7 @@ export function AddWslWorkspace({ wide, t, describe, checkPreset, listDistros, l
         </div>
         <div className="dww-actions">
           <button type="button" className="dww-btn" disabled={busy} onClick={maskClick}>{t('dialog.cancel')}</button>
-          <button type="button" className="dww-btn dww-btn--primary" disabled={busy || opening} onClick={() => void onConfirm()}>
+          <button type="button" className="dww-btn dww-btn--primary" disabled={busy || opening || distro === ''} onClick={() => void onConfirm()}>
             {busy ? t('dialog.loading') : t('dialog.confirm')}
           </button>
         </div>
