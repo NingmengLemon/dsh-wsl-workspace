@@ -1,10 +1,20 @@
 /**
  * Third-party stylesheet injection for the WSL workspace UI (the plugin
- * builds no CSS bundle, so styles are injected as one idempotent `<style>`).
+ * builds no CSS bundle, so styles are injected as one `<style>`).
  * Colors derive exclusively from the `--dsw-*` design tokens.
+ *
+ * The stylesheet is owned by the plugin's fiber rather than injected once and
+ * forgotten; `installStyles` documents the loader behaviour that forces this.
  */
 
-const STYLE_TAG_DATA_ATTRIBUTE = 'data-plugin="dsh-wsl-workspace"'
+/** This package, as the client module loader names it in `style[data-plugin]`. */
+const STYLE_TAG_PLUGIN = 'dsh-wsl-workspace'
+
+/** This stylesheet's own identity, in the platform's `data-plugin-css` convention. */
+const STYLE_TAG_CSS_ID = 'dsh-wsl-workspace/client.css'
+
+/** Selector for THIS stylesheet, which no other plugin's tag can satisfy. */
+const STYLE_TAG_SELECTOR = `style[data-plugin-css="${STYLE_TAG_CSS_ID}"]`
 
 const STYLES = `
 /* Sidebar-foot icon action beside Settings (28px round in the wide sidebar,
@@ -343,14 +353,56 @@ const STYLES = `
 `
 
 /**
- * Idempotently inject the plugin stylesheet. No-op when a tag with the
- * plugin's data attribute already exists.
+ * Inject the plugin stylesheet when it is not already installed.
+ *
+ * The guard is this stylesheet's own identity, so a tag another plugin happens
+ * to have claimed can never stand in for it.
  */
-export function ensureStyles(): void {
+function ensureStyles(): void {
   if (typeof document === 'undefined') return
-  if (document.querySelector(`style[${STYLE_TAG_DATA_ATTRIBUTE}]`) !== null) return
+  if (document.querySelector(STYLE_TAG_SELECTOR) !== null) return
   const style = document.createElement('style')
-  style.setAttribute('data-plugin', 'dsh-wsl-workspace')
+  style.setAttribute('data-plugin', STYLE_TAG_PLUGIN)
+  style.setAttribute('data-plugin-css', STYLE_TAG_CSS_ID)
   style.textContent = STYLES
   document.head.appendChild(style)
+}
+
+/** Remove this plugin's stylesheet, when it is installed. */
+function removeStyles(): void {
+  if (typeof document === 'undefined') return
+  document.querySelector(STYLE_TAG_SELECTOR)?.remove()
+}
+
+/**
+ * Install the plugin stylesheet and keep it installed for as long as the
+ * caller's effect lives.
+ *
+ * A one-shot injection does not survive this plugin's own load path. The
+ * client module loader reconciles a row by calling its `removeOwnedStyles(id)`,
+ * which deletes every `style[data-plugin="<package>"]` tag it owns, and this
+ * bundle carries its own package name in that attribute. Losing the tag costs
+ * every `.dww-*` rule at once: the sidebar action falls back to browser
+ * default styling and the dialog renders inline in the sidebar instead of as a
+ * fixed overlay. Nothing brings it back either, because the bundle's factory
+ * has already run and is memoized, so the styles stay gone for the rest of the
+ * page's lifetime and only a full reload recovers them.
+ *
+ * Watching the head for the tag's absence restores the stylesheet without
+ * depending on a render happening after the removal.
+ *
+ * @returns a disposer that stops watching and removes the stylesheet, so an
+ *   unloaded or replaced plugin leaves no orphan `<style>` behind.
+ */
+export function installStyles(): () => void {
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return () => {}
+  ensureStyles()
+  const observer = new MutationObserver(() => {
+    if (document.querySelector(STYLE_TAG_SELECTOR) === null) ensureStyles()
+  })
+  observer.observe(document.head, { childList: true })
+  return () => {
+    observer.disconnect()
+    removeStyles()
+  }
 }

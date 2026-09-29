@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { check as checkApi, describe as describeApi, listDir as listDirApi, listDistros as listDistrosApi, listWorkspaces as listWorkspacesApi, registerWindows as registerWindowsApi, setWorkspaceUser as setWorkspaceUserApi } from './api.ts'
 import { AddWslWorkspace, type AddWslWorkspaceInjected } from './AddWslWorkspace.tsx'
-import { ensureStyles } from './styles.ts'
+import { installStyles } from './styles.ts'
 import { zh, en } from './locales.ts'
 import { canonicalWindowsPath, isWslUnc, joinUnc, mntToWindowsPath } from '../shared/paths.ts'
 
@@ -175,7 +175,9 @@ export function apply(ctx: ClientContext): void {
     }
   }
 
-  ensureStyles()
+  // The stylesheet is an effect, not a one-shot call: the client module loader
+  // may remove it while this plugin stays mounted (see styles.ts).
+  ctx.effect(() => installStyles(), 'dsh-wsl-workspace: stylesheet')
 
   ctx.effect(
     () => ctx.locale.register('wslWorkspace' as never, { zh, en }),
