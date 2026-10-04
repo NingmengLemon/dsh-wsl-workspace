@@ -209,6 +209,18 @@ Two levels, in order of cost:
    chose; if that line names the Electron executable, the log also lists every candidate it
    rejected and why. Close the window and stop the process when done.
 
+   **A local directory is added as a link, so where you point it decides whether the plugin can
+   load at all.** `dsh plugin add <dir>` writes a `link:` dependency, and Node resolves bare
+   specifiers by walking up from the *realpath* — the directory you named, not the profile. So an
+   unpacked clone sitting in a bare temp folder resolves neither this package's own dependency nor
+   any host package, and the plugin fails at module load, which looks worse than the defect it is
+   meant to test. Either point at a directory inside a tree that already carries those packages
+   (that is why `scripts/verify-dsh-compat.sh` stages the plugin under the case's `node_modules`
+   before adding it, and why the item-4 clean-install check installs the tarball into a temp
+   project first), or hand the profile a tarball/by-name entry so pnpm lays the package out
+   itself. `#47`'s reporter hit exactly this while testing PR #48 — his own repro is the reason
+   this paragraph exists.
+
    `bash_background` deserves its own line here because the Desktop run is what caught it:
    the jobs registry resolves a job's `owner` with `ctx.agents.get(owner)`, so the owner must
    be the session **id** (`agent.id`, as the host's own producers pass). Passing the agent

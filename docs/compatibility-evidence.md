@@ -1674,6 +1674,35 @@ Replay: build a temp dir with that `pnpm-workspace.yaml` and a manifest dependin
 `lib/index.js` against a roster face exposing `register`/`readDocument`. The scratch trees
 and their homes were removed after both readings.
 
+**Confirmed on the reporter's own machine, three days later.** In his `#47` follow-up of
+2026-10-03 he listed `profiles/desktop/node_modules/dsh-wsl-workspace/node_modules/` on a real
+DSH Desktop 0.2.0-rc.2 profile after dropping his manual workaround and installing this build as
+a local tarball: `js-yaml → 4.3.2` present, `cordis-plugin-include` absent — the same layout our
+temp installer leg produced, now read off a deployment we do not control. His four-consumer probe
+also shows the nesting is per-package rather than global (`dsh-config-manager` still resolves
+5.4.2 from its own nested copy), and he measured the WSL execution path end-to-end: the relay run
+with cwd `\\wsl$\archlinux\root` reported `user=root`, `pwd=/root` and the WSL2 kernel with exit
+0, and a Windows-side write through the UNC share read back identical inside the distribution and
+vice versa. What his frame does **not** contain is a dialog-level reading taken against this
+branch — his 2026-10-01 confirmation that the picker showed `wsl-*` presets was of the manual
+workaround, and the declaration channel writes no directories, so a count of entries under
+`~/.dsh/.agent-presets/` is not evidence either way. That one leg still waits for a published
+0.7.6 (registry `latest` was 0.7.5 as of 2026-10-03, verified with `npm view`) or for a maintainer
+to boot the packaged host.
+
+**Two things he corrected in us, both kept rather than quietly fixed.**
+
+- Our reply text told him to `dsh plugin --profile desktop add <clone directory>`. On Desktop that
+  produces a `link:` whose realpath is wherever the clone sits, so nothing on that walk-up — not
+  even a host package — resolves, and the plugin fails at module load: a worse shape than the
+  defect being tested. Our own `scripts/verify-dsh-compat.sh:82-85` already documents this staging
+  requirement, and `TESTING.md` now says it out loud.
+- `8bbd2f2`'s message offered `git log --all -S host-profile-isolation` as evidence that an
+  uncommitted coverage matrix had never reached a commit. That query is about the test file, not the
+  matrix, and it returns 2 hits here (`2f913e9`, `430c259`). The on-topic queries are
+  `git log --all -S N34` and `-S "⑤ evidence"`, both 0 — so the claim survives, its stated proof did
+  not.
+
 **What remains unverified, stated as limits.** The installer act above is measured for
 pnpm's hoisted linker with the reporter's own settings on this machine, on this machine's own
 Desktop profile shape; what still has no reading is the **packaged host process**. A real DSH
