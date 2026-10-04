@@ -1700,8 +1700,14 @@ to boot the packaged host.
 - `8bbd2f2`'s message offered `git log --all -S host-profile-isolation` as evidence that an
   uncommitted coverage matrix had never reached a commit. That query is about the test file, not the
   matrix, and it returns 2 hits here (`2f913e9`, `430c259`). The on-topic queries are
-  `git log --all -S N34` and `-S "⑤ evidence"`, both 0 — so the claim survives, its stated proof did
-  not.
+  `git log --all -S N34` and `-S "⑤ evidence"` — and those were 0 only until **this very commit put
+  the strings `N34` and `⑤ evidence` into the repository**, after which they each return 1: itself.
+  Asking the same question with markers this section never quotes gives the durable answer:
+  `-S "⑦ evidence"`, `-S "unmet \`N35\`"` and `-S "same as \`smoke.ts\`"` are all 0, and
+  `git grep ⑦ e11a36b -- TESTING.md docs/CHECK-CATALOG.md` finds nothing either. So the claim
+  survives; both stated proofs before this line were defective — first the wrong target, then a
+  self-polluted query. **Method note, kept because it generalises: a `git log -S` claim stops being
+  evidence as soon as the commit making it writes the searched string into the tree.**
 
 **What remains unverified, stated as limits.** The installer act above is measured for
 pnpm's hoisted linker with the reporter's own settings on this machine, on this machine's own
@@ -1737,3 +1743,32 @@ rather than only route liveness — measured for the window releases in CI run 3
 and it stays structurally the positive control for the peer question, never the
 reproduction, because its staging puts the plugin where a walk-up can find the host's
 packages.
+
+**How #47 was closed (2026-10-03), and what that does and does not cover.** The reporter closed
+it himself after his fourth verification pass, whose substance we re-checked where we could:
+his real Desktop profile shows the engine nested under the plugin (`js-yaml → 4.3.2`) with the
+borrowed include package still absent, his relay run inside `\\wsl$\archlinux\root` returned
+`user=root` / `pwd=/root` / WSL2 kernel with exit 0, and UNC↔`/mnt` round-trips matched. The
+user-level statement behind closure is "the plugin links into WSL normally now".
+
+What closure therefore rests on: the **defect's mechanism** (both shortages), the **repair's
+mechanism** (installer nesting, per-source fault tolerance, a self-describing failure), and the
+**execution path's parts** — each measured, most of them twice, once on a machine we do not
+control. What it does not rest on: a reading of the picker on this build. The dialog question
+he answered in his 2026-10-01 comment belonged to his manual workaround, and the declaration
+channel writes no directories, so an empty `~/.dsh/.agent-presets/` says nothing either way —
+that count must not be cited as evidence again.
+
+Three things survive the closure, each with a stated verdict rather than silence:
+
+1. **Republish-and-retest by name.** `0.7.6` is not on the registry (verified 2026-10-03:
+   `latest` = 0.7.5), so every real-machine reading so far is of a local tarball. Once published,
+   the reporter's own by-name install closes the picker leg from the outside; a maintainer booting
+   the packaged host closes it from the inside.
+2. **A Desktop failure currently has nowhere to be written.** Nothing the host logs is persisted
+   on a healthy Desktop boot, so "look at the log" is not an option on that platform and the GUI
+   is the only channel. Filed separately because it changes `describeSelf`'s shape and the client
+   locale strings, which the documentation-parity gate governs.
+3. Small, but it bit a contributor: `dsh plugin add <directory>` on Desktop links, and a link out
+   of a package-carrying tree makes the plugin fail to load at all — worse-looking than the defect.
+   `TESTING.md` now states the precondition where the Desktop pass meets it.
