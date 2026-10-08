@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { resolveRelayNode } from '../src/shared/relay-node.ts'
 
 const require = createRequire(import.meta.url)
 
@@ -223,6 +224,21 @@ assert(world.config.some(row => row.id === 'tool-fs' && row.name === '@deepseek-
 
 // Config values are not module specifiers: the PTY backend spawns the relay and
 // the interpreter, so those must stay native filesystem paths.
+
+// The one interpreter **both** tiers below compare against, resolved the way the product resolves
+// it, so it has to be out here rather than inside either arm. A fallback would make the assertions
+// pass for the wrong reason, so it is refused up front instead of surfacing later as a mismatch that
+// looks like a declaration bug.
+//
+// This was inside `if (SESSION_TIER)` when first written, and its own comment said "both branches
+// below" — the comment was right and the placement was not, which is why one tier was green and the
+// other died on `ReferenceError: relayNode is not defined`. `tests/host-declare.mjs` is in
+// `test:node`, so the node bucket caught it; nothing on this machine did, because the script needs
+// the pinned host tree and stops earlier without it.
+const relayNode = await resolveRelayNode()
+assert(relayNode.fallback === false,
+  `a real node interpreter was found (resolved ${relayNode.path} from ${relayNode.source})`)
+
 if (SESSION_TIER) {
   const sessionRow = world.config.find(row => row.id === 'bash-wsl')
   assert(sessionRow !== undefined, 'the world mounts its own session bash tool')
@@ -236,14 +252,38 @@ if (SESSION_TIER) {
   assert(doorTool !== undefined && doorTool.name.startsWith('file://'), 'the door tool is a file: URL')
   assert(existsSync(fileURLToPath(doorTool.name)), 'and it points at a real built file')
   const doorBackend = door.config.find(row => row.id === 'terminal-wsl')
-  assert(doorBackend.config.shellPath === process.execPath.replace(/\\/g, '/'), 'the door\'s interpreter stays a native path')
+  // Assert the interpreter is the one the product's **own** resolver picks, normalised the way the
+  // product normalises it (issue #44 §4, `T2`).
+  //
+  // The old assertion compared the declaration against `process.execPath` — the node that happens to
+  // be running the test. Here and on CI the two agree (this machine's resolver answers "the host
+  // process is not Electron, so it is already a real node"), and that agreement is exactly what made
+  // it look like a property. It is not one: `process.execPath` is the *launcher*, while the product's
+  // choice is `relay?.path ?? process.execPath` (`src/index.ts:1008`). On a host where the resolver
+  // legitimately picks another node — an Electron build, a `PATH` node, the pinned toolchain under
+  // `ci/deps` — the old form reports a mismatch that says nothing about whether the declaration is
+  // right.
+  //
+  // **Both sides are normalised**, because the product writes the value through
+  // `.replace(/\\/g, '/')` (`src/index.ts:1008`). Comparing a normalised declaration against a raw
+  // resolution passes on Linux and fails on Windows — the same class of accident in the other
+  // direction, and how the first version of this fix was written. CI cannot see it: neither CI
+  // runner has a backslash to disagree about.
+  //
+  // `relayNode.path` is the correct expectation rather than "either arm of the product's
+  // expression", because this tier is only declared when `persistentShellAllowed()` answered true,
+  // and that is `probeSaysYes && relay !== undefined && relay.fallback !== true`
+  // (`src/shared/relay-node.ts:310`). The fallback arm cannot be the one that ran.
+  assert(doorBackend.config.shellPath === relayNode.path.replace(/\\/g, '/'),
+    `the door's interpreter is the one resolveRelayNode() picks, normalised (got ${doorBackend.config.shellPath}, resolved ${relayNode.path} from ${relayNode.source})`)
   assert(doorBackend.config.shellArgs[0].endsWith('/lib/wsl-relay.js'), 'the door runs this installation\'s relay')
   assert(!world.config.some(row => row.id === 'persistent-shell'), 'no host PTY group is declared in the session tier')
 } else {
 const shellGroup = world.config.find(row => row.id === 'persistent-shell')
 assert(shellGroup !== undefined, 'the world mounts its own persistent shell')
 const terminal = shellGroup.config.find(row => row.id === 'terminal-wsl')
-assert(terminal.config.shellPath === process.execPath.replace(/\\/g, '/'), 'the interpreter stays a native path')
+assert(terminal.config.shellPath === relayNode.path.replace(/\\/g, '/'),
+  `the interpreter is the one resolveRelayNode() picks, normalised (got ${terminal.config.shellPath}, resolved ${relayNode.path} from ${relayNode.source})`)
 assert(terminal.config.shellArgs[0].endsWith('/lib/wsl-relay.js'), 'the relay stays a native path')
 assert(!terminal.config.shellArgs[0].startsWith('file://'), 'the relay is not rewritten to a file: URL')
 assert(terminal.config.backendType === 'wsl', 'the persistent shell uses the WSL backend')
