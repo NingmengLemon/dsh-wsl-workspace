@@ -36,7 +36,10 @@ import { homedir } from 'node:os'
 import { joinUnc, mntToWindowsPath, normalizeLinuxPath, isAbsoluteLinuxPath, isValidWslUsername, parseWslUnc } from './shared/paths.ts'
 import { canonicalWslUnc, getWindowsWorkspace, getWorkspaceUsername, listWorkspaceKeys, listWorkspaceRecords, registerWindowsWorkspace, setWorkspaceUsername } from './shared/wsl-credentials.ts'
 import { defaultDistro, listDistros } from './shared/wsl.ts'
-import { isElectronHost, resolveRelayNode } from './shared/relay-node.ts'
+import { isElectronHost, persistentShellAllowed, resolveRelayNode } from './shared/relay-node.ts'
+import { probePersistentShellReadiness } from './host/pty-readiness.ts'
+import { PROBE_CONFIG, buildSessionSpec } from './host/wsl-bash-tool.ts'
+import { probeWslBashSession, type WslBashSpawnHost } from './host/wsl-bash-session.ts'
 import { isWslVariantId, transformPresetForWsl, unquoteScalar, variantIdFor } from './host/variants.ts'
 import { WslSkillsProvider, type WslSkillsRegistryFace } from './host/wsl-skills.ts'
 
@@ -613,6 +616,25 @@ function publishVariant(staging: string, dest: string): void {
 }
 
 /**
+ * The directory the readiness probe should start the relay in.
+ *
+ * The backend spawns the persistent shell with the session's workspace path, which
+ * for a WSL workspace is a UNC path — so a probe that always starts in a Windows
+ * directory can certify a shell shape no session will ever use. The registered
+ * workspaces are the closest thing to that path available at profile boot; with none
+ * stored yet, the Windows fallback is used and the probe says it did not verify the
+ * UNC case rather than implying it did.
+ * @returns a canonical UNC workspace path when one is registered, else a Windows directory.
+ */
+function readinessCwd(): string {
+  for (const key of listWorkspaceKeys()) {
+    const canonical = canonicalWslUnc(key)
+    if (canonical !== null) return canonical
+  }
+  return process.env.SystemRoot ?? process.cwd()
+}
+
+/**
  * Whether a host's terminal stack can allocate a PTY process *on this platform*.
  *
  * The world's `bash` is the host's persistent-shell stack, and on Windows that
@@ -633,14 +655,15 @@ function publishVariant(staging: string, dest: string): void {
  * spawn failure instead, which is the "supported" answer.
  * @param ctx - plugin context; the `subprocess` service is looked up with `get`
  *   and waited for briefly, because the world is generated during profile boot.
- * @returns true when the persistent shell may be mounted.
+ * @returns whether the persistent shell may be mounted, and the service face the
+ *   readiness stage probes with (undefined when there was nothing to probe).
  */
-async function supportsPersistentShell(ctx: Context): Promise<boolean> {
+async function supportsPersistentShell(ctx: Context): Promise<{ ok: boolean; subprocess: SubprocessProbeFace | undefined }> {
   // POSIX hosts have an inspector on every declared release, and a WSL world is
   // Windows-only anyway.
-  if (process.platform !== 'win32') return true
+  if (process.platform !== 'win32') return { ok: true, subprocess: undefined }
   const subprocess = await waitForSubprocess(ctx)
-  if (subprocess?.spawnTerminal === undefined) return true
+  if (subprocess?.spawnTerminal === undefined) return { ok: true, subprocess }
   try {
     const handle = await subprocess.spawnTerminal({
       argv: ['dsh-wsl-workspace-pty-probe-does-not-exist'],
@@ -652,9 +675,9 @@ async function supportsPersistentShell(ctx: Context): Promise<boolean> {
     // Unexpectedly alive: this host starts a PTY for a missing program, so the
     // terminal stack works. Take the probe process down again.
     await handle?.terminate?.()
-    return true
+    return { ok: true, subprocess }
   } catch (error) {
-    return !isTerminalInspectionUnsupported(error)
+    return { ok: !isTerminalInspectionUnsupported(error), subprocess }
   }
 }
 
@@ -702,7 +725,7 @@ async function waitForSubprocess(ctx: Context): Promise<SubprocessProbeFace | un
 async function materializeVariants(
   agentPresets: AgentPresetsService,
   dshHome: string,
-  paths: { shell: string; fs: string; relay: string; node: string; sandbox: string; search: string; jobs: string },
+  paths: { shell: string; fs: string; relay: string; node: string; sandbox: string; search: string; jobs: string; bashTool: string; terminalTool: string; shellMode: 'session' | 'pty' },
   persistentShell: boolean,
   track: (dispose: unknown) => void,
 ): Promise<void> {
@@ -774,7 +797,7 @@ async function materializeOne(
   agentPresets: AgentPresetsService,
   preset: AgentPresetRosterEntry,
   userRoot: string,
-  paths: { shell: string; fs: string; relay: string; node: string; sandbox: string; search: string; jobs: string },
+  paths: { shell: string; fs: string; relay: string; node: string; sandbox: string; search: string; jobs: string; bashTool: string; terminalTool: string; shellMode: 'session' | 'pty' },
   persistentShell: boolean,
   track: (dispose: unknown) => void,
   generated: Set<string>,
@@ -785,6 +808,9 @@ async function materializeOne(
     relayPath: paths.relay,
     nodePath: paths.node,
     sandboxPath: paths.sandbox,
+    bashPath: paths.bashTool,
+    terminalTool: paths.terminalTool,
+    mode: paths.shellMode,
   } : undefined, paths.search, paths.jobs)
   // 0.1.7-alpha.1+ publishes a variant as a declaration row (the composition is
   // already the exact entry-list dialect the declaration wants, so the only
@@ -878,6 +904,12 @@ export function apply(ctx: Context, config: Config): void {
   // The persistent shell runs the host PTY backend on the relay, which starts
   // `wsl.exe … bash` under that PTY: two paths the generated preset must carry.
   const relayPath = join(packageRoot, 'lib', 'wsl-relay.js').replace(/\\/g, '/')
+  // The pipe-driven persistent shell tool that replaces the host's PTY-backed one by default.
+  const bashToolPath = join(packageRoot, 'lib', 'wsl-bash-tool.js').replace(/\\/g, '/')
+  // The keyboard door the session tier mounts beside it: the model-facing shape over the
+  // host's PTY registry, so a password prompt or a REPL has an answer that is not "a person
+  // must do it". It is the only row in this world that needs the relay's interpreter.
+  const terminalToolPath = join(packageRoot, 'lib', 'wsl-terminal-tool.js').replace(/\\/g, '/')
   const sandboxPath = join(packageRoot, 'lib', 'wsl-sandbox.js').replace(/\\/g, '/')
   // The in-distribution `grep`/`glob` twin that replaces the host search suite.
   const searchPath = join(packageRoot, 'lib', 'wsl-search.js').replace(/\\/g, '/')
@@ -904,20 +936,69 @@ export function apply(ctx: Context, config: Config): void {
         disposers.push(retire)
       }
       void (async () => {
-        const persistentShell = await supportsPersistentShell(ctx)
+        const probe = await supportsPersistentShell(ctx)
         // The PTY backend starts `shellPath` with `shellArgs`, so the relay's
         // interpreter is this plugin's one choice in that stack. It has to be a
         // real node: on DSH Desktop `process.execPath` is the Electron
         // executable, and an Electron binary under a ConPTY writes nothing at
         // all — which is the "PTY shell exited during startup" failure of
         // issue #40. See `src/shared/relay-node.ts`.
-        const relay = persistentShell ? await resolveRelayNode() : undefined
+        const relay = probe.ok ? await resolveRelayNode() : undefined
+        let persistentShell = persistentShellAllowed(probe.ok, relay)
+        // Which persistent shell the world mounts. The pipe-driven session is the default: the
+        // PTY-backed one hangs every call the moment the shell repaints the sentinel line
+        // (issue #51 point 3), and a session needs no PTY, no relay interpreter and no terminal
+        // readiness contract. `DSH_WSL_PTY_SHELL=1` keeps the old tier reachable.
+        const shellMode: 'session' | 'pty' = process.env.DSH_WSL_PTY_SHELL === '1' ? 'pty' : 'session'
         if (relay !== undefined && isElectronHost()) {
           const detail = relay.rejected.length === 0 ? '' : ` (rejected: ${relay.rejected.join('; ')})`
           if (relay.fallback) {
-            console.warn(`dsh-wsl-workspace: persistent shell: ${relay.source}${detail}`)
+            console.warn(`dsh-wsl-workspace: persistent shell: not mounted, ${relay.source}${detail}`)
           } else {
             console.log(`dsh-wsl-workspace: persistent shell: relay interpreter is ${relay.path} — ${relay.source}${detail}`)
+          }
+        }
+        // issue #51 needed the next question answered too — whether a WSL shell
+        // under this host actually reaches the state the backend's own completion
+        // check looks for — because a host can pass the first and fail every
+        // `bash` call afterwards. Bounded at 15 s and win32-only; a host whose
+        // terminal face this probe cannot read is reported as unverified rather
+        // than failed.
+        if (persistentShell && process.platform === 'win32' && shellMode === 'session') {
+          // The session tier is probed with the protocol it will actually use: boot a shell, run
+          // one computed command, require the computed answer. A probe that only checks the wire
+          // for a prompt can certify a world in which every call hangs, and did.
+          const spec = buildSessionSpec(PROBE_CONFIG, readinessCwd())
+          if (spec === undefined) {
+            persistentShell = false
+            console.warn('dsh-wsl-workspace: persistent shell: not mounted, no WSL distribution resolved for the session probe')
+          } else if (probe.subprocess === undefined) {
+            // No seam to probe with is not evidence of a broken shell: the tool resolves its own
+            // `subprocess` from the live context when the session is first used. Demoting here
+            // would turn an unreadable host into a missing feature, which is the mistake this
+            // stage exists to avoid.
+            console.warn('dsh-wsl-workspace: persistent shell: session probe skipped, no subprocess service to probe with; mounted unverified')
+          } else {
+            const readiness = await probeWslBashSession({ subprocess: probe.subprocess as unknown as WslBashSpawnHost['subprocess'] }, spec)
+            if (!readiness.ready) {
+              persistentShell = false
+              console.warn(`dsh-wsl-workspace: persistent shell: not mounted, session probe failed — ${readiness.detail}`)
+            } else {
+              console.log(`dsh-wsl-workspace: persistent shell: session probe passed — ${readiness.detail}`)
+            }
+          }
+        } else if (persistentShell && process.platform === 'win32') {
+          const readiness = await probePersistentShellReadiness(probe.subprocess, {
+            relayPath,
+            nodePath: relay?.path ?? process.execPath,
+          }, readinessCwd())
+          if (!readiness.ready) {
+            persistentShell = false
+            console.warn(`dsh-wsl-workspace: persistent shell: not mounted, readiness probe failed — ${readiness.detail}`)
+          } else if (readiness.unverifiable === true) {
+            console.warn(`dsh-wsl-workspace: persistent shell: mounted unverified — ${readiness.detail}`)
+          } else {
+            console.log(`dsh-wsl-workspace: persistent shell: readiness probe passed — ${readiness.detail}`)
           }
         }
         await materializeVariants(agentPresets, dshHome, {
@@ -928,6 +1009,9 @@ export function apply(ctx: Context, config: Config): void {
           sandbox: sandboxPath,
           search: searchPath,
           jobs: jobsPath,
+          bashTool: bashToolPath,
+          terminalTool: terminalToolPath,
+          shellMode,
         }, persistentShell, track)
       })().catch((error) => {
         // Variant generation is best-effort over a live roster: a missing or

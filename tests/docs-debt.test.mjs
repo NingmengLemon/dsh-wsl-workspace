@@ -21,6 +21,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { subjectExists } from './parity/derive.mjs'
 import {
   APPLICABLE_CLAIMS, APPLICABLE_WATCHED_CONSTANTS, CLAIMS, DECLARED_RED_CLAIMS, GREEN_CLAIMS,
   INAPPLICABLE_CLAIMS, WATCHED_CONSTANTS,
@@ -151,14 +152,23 @@ test('a claim whose subject is absent here is neither passing nor failing', () =
   // The third state, checked. Without it the two shapes are indistinguishable in the report, and one
   // of them is a false accusation: red says the code has a defect it does not have, green says nothing
   // was compared when something was.
+  //
   // No requirement that an incomparable claim carries a debt: it is not a defect anyone has agreed
   // to own yet, it is a question this branch cannot ask. What must hold is the other direction — a
-  // claim being compared must not also claim to be incomparable, or the third state swallows it.
+  // claim being compared must have a subject that **exists**, or the third state swallows it.
+  //
+  // The check is `subjectExists(claim.not_applicable_without)`, not "the field is undefined". A claim
+  // declares its subject and **keeps** the declaration once the subject arrives — that is the whole
+  // mechanism, since a claim keyed by subject resumes without an edit here. #51 brought
+  // `src/shared/wsl-stdin.ts` and `src/host/wsl-bash-tool.ts` into existence and both claims came
+  // back on their own, which is what this line is here to confirm rather than to re-derive.
   assert.ok(INAPPLICABLE_CLAIMS.every(claim => claim.not_applicable_without !== undefined),
     'an incomparable claim must name the subject it is waiting for')
+  assert.ok(INAPPLICABLE_CLAIMS.every(claim => !subjectExists(claim.not_applicable_without)),
+    'a claim is listed as incomparable although its subject is right here — compare it instead')
   for (const claim of CHECKED) {
-    assert.equal(claim.not_applicable_without, undefined,
-      `${claim.id} is being compared, so it must not also be listed as incomparable`)
+    assert.ok(claim.not_applicable_without === undefined || subjectExists(claim.not_applicable_without),
+      `${claim.id} is being compared, so its subject must exist`)
   }
 })
 

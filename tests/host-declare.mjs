@@ -21,6 +21,10 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
+
+/** The persistent-shell tier this run declares; `--pty` asks for the host's PTY stack. */
+const SESSION_TIER = !process.argv.includes('--pty')
+if (!SESSION_TIER) process.env.DSH_WSL_PTY_SHELL = '1'
 const home = mkdtempSync(join(tmpdir(), 'dsh-wsl-declare-'))
 process.env.DSH_HOME = home
 
@@ -214,8 +218,28 @@ assert(standard.plugins.some(row => row.id === 'tool-fs-search') === false, 'the
 assert(world.config.some(row => row.id === 'tool-fs' && row.name === '@deepseek-ai/dsh-tool-fs'),
   'bare package specifiers are left untouched')
 
+// Which persistent shell tier this run declares; `--pty` asks for the host's PTY stack. The two
+// tiers are asserted separately because they are different mounts, not two spellings of one.
+
 // Config values are not module specifiers: the PTY backend spawns the relay and
 // the interpreter, so those must stay native filesystem paths.
+if (SESSION_TIER) {
+  const sessionRow = world.config.find(row => row.id === 'bash-wsl')
+  assert(sessionRow !== undefined, 'the world mounts its own session bash tool')
+  assert(sessionRow.name.startsWith('file://'), 'the session tool is declared as a file: URL like our other providers')
+  assert(existsSync(fileURLToPath(sessionRow.name)), 'and it points at a real built file')
+  // The keyboard door is declared on this channel too: a nested group whose own rows are file: URLs
+  // for the tool, and native paths for the interpreter and relay the backend spawns.
+  const door = world.config.find(row => row.id === 'terminal-door')
+  assert(door !== undefined && door.group === true, 'the keyboard door is declared in the session tier')
+  const doorTool = door.config.find(row => row.id === 'terminal-door-tool')
+  assert(doorTool !== undefined && doorTool.name.startsWith('file://'), 'the door tool is a file: URL')
+  assert(existsSync(fileURLToPath(doorTool.name)), 'and it points at a real built file')
+  const doorBackend = door.config.find(row => row.id === 'terminal-wsl')
+  assert(doorBackend.config.shellPath === process.execPath.replace(/\\/g, '/'), 'the door\'s interpreter stays a native path')
+  assert(doorBackend.config.shellArgs[0].endsWith('/lib/wsl-relay.js'), 'the door runs this installation\'s relay')
+  assert(!world.config.some(row => row.id === 'persistent-shell'), 'no host PTY group is declared in the session tier')
+} else {
 const shellGroup = world.config.find(row => row.id === 'persistent-shell')
 assert(shellGroup !== undefined, 'the world mounts its own persistent shell')
 const terminal = shellGroup.config.find(row => row.id === 'terminal-wsl')
@@ -223,6 +247,7 @@ assert(terminal.config.shellPath === process.execPath.replace(/\\/g, '/'), 'the 
 assert(terminal.config.shellArgs[0].endsWith('/lib/wsl-relay.js'), 'the relay stays a native path')
 assert(!terminal.config.shellArgs[0].startsWith('file://'), 'the relay is not rewritten to a file: URL')
 assert(terminal.config.backendType === 'wsl', 'the persistent shell uses the WSL backend')
+}
 
 // ── the composition survives the YAML round-trip ───────────────────────────
 // `readDocument().content` is the entry-list dialect, whose `!!js` scalars the
@@ -238,7 +263,7 @@ assert(world.config.some(row => row.id === 'jobs-wsl'), 'a source with job tools
 const minimal = byId.get('wsl-minimal')
 const minWorld = minimal.plugins.find(row => row.id === 'wsl-world')
 assert(minimal.plugins.some(row => row.id === 'persistent-shell') === false, 'the source PTY group is replaced, not duplicated')
-assert(minWorld.config.some(row => row.id === 'persistent-shell'), 'the world provides the persistent shell instead')
+assert(minWorld.config.some(row => row.id === (SESSION_TIER ? 'bash-wsl' : 'persistent-shell')), 'the world provides its own shell instead')
 assert(minWorld.config.some(row => row.id === 'search-wsl') === false, 'a mode with no search suite gains none')
 assert(minimal.plugins.some(row => row.id === 'skill-filesystem') === false, 'minimal declares no skill row to amend')
 

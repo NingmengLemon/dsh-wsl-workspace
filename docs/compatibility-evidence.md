@@ -1772,3 +1772,1599 @@ Three things survive the closure, each with a stated verdict rather than silence
 3. Small, but it bit a contributor: `dsh plugin add <directory>` on Desktop links, and a link out
    of a package-carrying tree makes the plugin fail to load at all — worse-looking than the defect.
    `TESTING.md` now states the precondition where the Desktop pass meets it.
+
+## Issue #51: a Desktop 0.2.x workspace where every `bash` call failed (2026-10-04, plugin 0.7.6)
+
+**What the reporter saw.** DSH Desktop 0.2.0-rc.2, workspace `\wsl.localhost\Ubuntu\home`,
+plugin 0.7.5: every `bash` call returns `Error: PTY shell exited during startup`, while the file
+tools work. Their report lists four independent incompatibilities and asks for host-side help on
+two of them. The report is attached to the issue, so this section records what could be measured
+here and what could not.
+
+**Proven from this tree, and fixed here (point 4 of four).** `@deepseek-ai/dsh-shell@0.2.0-rc.2`
+declares the seam as `abstract resolve` + `abstract execute(spec): Promise<ShellExecution>`
+(`lib/types/index.d.ts:61,69`), and the host's `@deepseek-ai/dsh-tool-bash` calls
+`await (await ctx.shell.execute(ctx.shell.resolve(request))).result()`. `WslShellExecutor`
+implemented `resolve`/`run`/`start` — the 0.1.x contract — and did not implement `execute`.
+The compiler has been saying so in these words:
+
+```
+src/shell.ts(157,14): error TS2515: Non-abstract class 'WslShellExecutor' does not implement
+  inherited abstract member execute from class 'ShellExecutor'.
+```
+
+read from `tsc --noEmit` on 2026-10-04, together with two sibling gaps of the same family
+(`onExpiry` missing on the spec at `:202`, `observed` missing on the handle at `:410`). The
+count-only budget hid all three: the gate compares the number of `error TS` lines with
+`ci/typecheck-baseline.json`, and the tree reported **212 of 212** — the budget met exactly.
+Because `src/host/variants.ts` mounts that same host tool whenever there is no persistent shell,
+the fallback leg was broken too, which is why the reporter's workaround had to patch both files.
+The fix is one primitive (`spawnExecution`) with three faces on it, plus
+`tests/shell-execute-shape.mjs`, plus a `banned` code list in the same baseline — see
+[CHECK-CATALOG.md](CHECK-CATALOG.md) for the controls run against it.
+
+**Proven from this tree, and fixed here (a cause the report did not name).** When
+`resolveRelayNode()` finds no real node it returns `fallback: true`, whose `source` states in its
+own words that "a PTY child started from it produces no output" — and 0.7.5/0.7.6 mounted the PTY
+world anyway after a `console.warn`. Measured in issue #40's table (this file, above): the Electron
+binary under a real ConPTY writes **0 bytes** and exits 0, which is exactly
+`waitReason === 'session_exit'` in `LocalPtySession.initialize()` — the reporter's literal error
+message, reachable without any UNC path involved. The decision is now
+`persistentShellAllowed(probe, relay)` in `src/shared/relay-node.ts`, and a fallback answer demotes
+the world to the one-shot `bash` instead of shipping a terminal that cannot start.
+
+**Not reproduced, and therefore not fixed here (point 1).** "node.exe crashes instantly when
+started with a `\wsl.localhost\…` cwd" contradicts two first-hand readings already in this
+repository: the interpreter table directly above, run on this machine with the same payload node
+the reporter names (24.21.0) under a real ConPTY at cwd `\wsl.localhost\Ubuntu\home\mille`,
+produced 170 bytes and a live prompt; and the retraction recorded in
+[CHECK-CATALOG.md](CHECK-CATALOG.md), where 20/20 spawns with a UNC cwd succeeded once the shell
+stopped eating an escaping layer. Both readings are of *spawn*, not of node's own nearest
+`package.json` walk, so they do not refute the mechanism — but the failing read in their error text
+is `\?\UNC\wsl.localhost\package.json`, which is the 9P root, and `connection reset by peer` there
+is the signature this file already documents for an idle distro whose share has vanished. Two
+differences between their workspace and every green run recorded here are candidates and neither
+can be settled without a live measurement: `/home` versus a user home (the walk stops at the first
+ancestor carrying a `package.json`), and a cold share versus a held-open one.
+
+**Not settled, and the report's own mechanism has a hole in it (points 2 and 3).** Point 2 is true
+as a fact about the host: `childEnvironment()` injects `PS1`/`PROMPT_COMMAND` as *Windows*
+environment variables, and nothing in this plugin puts them in `WSLENV` — grep finds the two names
+only inside `scripts/compatibility/conpty-relay.mjs:62-63`, hand-copied. This file even records the
+consequence without naming it: the green run's captured prompt was `mille@mikao:~$`, the
+distribution default, not `dsh> `. What is not settled is the cost, because the host has an idle
+fallback (`pollReadiness`, `inferred_idle`, `idleSilenceMs` default 3000) that should complete a
+command at a latency penalty rather than hang. Point 3's hang cannot be explained by the predicate
+the report cites: `foreground?.processGroupId === this.shellPgid` compares `undefined` with
+`undefined` when the inspection returns nothing, which is *true*, and an inspection that throws
+routes to `failActive` — an error, not 300 seconds. `@deepseek-ai/dsh-win32-process` is not vendored
+in this repository, so `inspectForeground()`'s real shape can only be measured on a Desktop install;
+and the 300 s was measured on the report's own hand-edited `shellPath = wsl.exe` topology, not on
+the shipped `node → wsl-relay → wsl.exe` one.
+
+**Not implementable as written (their suggested remedy 4).** `dsh.compatibility.blocklist` does not
+exist: the string appears zero times outside `node_modules` in this tree and zero times in any
+vendored host file, and no vendored `@deepseek-ai` module reads `dshReleases` at all — the reading
+lives in `dsh-plugin-manager`, which is not vendored. So whether an unlisted release fails open or
+closed cannot be answered from here, and the honest interim change to the declaration is a decision
+for the maintainer, not an invention of a key.
+
+### The #51 matrix, run on this machine (2026-10-04, plugin 0.7.6 at `14c444d`)
+
+Harness, stated first because two of the readings depend on it: Windows 10.0.19045,
+WSL 3.0.1.0 / kernel 6.18.40.1, distro Ubuntu (default user `ruler` from `/etc/wsl.conf`),
+the reporter's **own payload executable** (`…/primary-runtime/dependencies/node/bin/node.exe`,
+`v24.21.0`), and the **real** terminal seam — `@deepseek-ai/dsh-subprocess-local@0.2.0-rc.2`
+over `dsh-win32-process@0.2.0-rc.2` and `node-pty@1.2.0-beta.15`, all three at the versions the
+0.2.0-rc.2 host declares. Driver scripts live outside the repository (`D:/Temp/issue51-matrix/`).
+Two writes landed inside the distribution and are stated rather than glossed: the fixture
+directories under `/home/ruler/` that these runs created and removed again, and `/home/ruler/.bash_history`,
+which the interactive probe shells appended to (last entries `echo T3_MARKER`, `echo T5_MARKER`,
+mtime 2026-10-04 10:26) — the user's own history file was not otherwise modified, and removing
+those lines is left as an offer rather than done unasked. Both distros were left `Stopped`, which is
+how they were found.
+
+**Point 1 — node.exe with a UNC cwd does not crash here, cold or warm.** Five cwd cells
+(`\wsl.localhost\Ubuntu`, `\home`, `\home\ruler`, and two depths under a fixture tree, one with a
+`package.json` at the parent and one without) × two states (distro freshly `--terminate`d, and
+running): `--version` exits **0 in 117–167 ms warm, 1251–186 ms cold** in every cell, printing
+`v24.21.0`. The `package.json`-walk hypothesis is refuted as a *necessary* condition — the deep
+cell without any ancestor `package.json` boots fine, so reaching for `\?\UNC\wsl.localhost\package.json`
+is not by itself fatal on this kernel. What the reporter saw is still a real signature
+(`connection reset by peer` on a 9P read); it is just not a property of node-with-a-UNC-cwd, and
+this machine cannot produce it. **Not fixed, because there is nothing here to fix**, and the
+claim is narrowed rather than dismissed: their error names the provider root, which is where a
+share that has vanished answers from.
+
+**Point 2 — the contract really does not cross, and it is fixable on the plugin side.** The
+shipped relay under a real ConPTY at the reporter's exact cwd (`\wsl.localhost\Ubuntu\home`)
+starts, stays up, and reaches a prompt — but the prompt is the **distribution default**:
+`OSC 133;D` absent, `dsh> ` absent, over 1591 bytes. Naming the two keys in `WSLENV` — one
+environment line in the relay, `src/shared/wsl-env.ts` — flips both readings to present on the
+same wire with nothing else changed. One nuance the report did not have: `PS1` itself does not
+survive the crossing (an interactive `bash` assigns its own), and that does not matter, because
+the host's `PROMPT_COMMAND` text re-assigns `PS1` at every prompt. So the bridge needs the
+marker variable, and the profile chain the relay runs (`bash -lc`) does not undo it.
+This is what `scripts/compatibility/conpty-relay.mjs` now asserts. Its previous assertion was
+`/[$#]\s*$/` against an injected `'DSH> '` — uppercase, so it could never have matched the host's
+lowercase prompt, and a distribution default ending in `$ ` satisfied it anyway. The gate that
+was supposed to cover this stage was constructed to pass without the contract.
+
+**Point 3 — the mechanism the report names cannot be what fails here.** `inspectForeground()`
+was polled six times per topology, 800 ms apart, through the real seam: the shipped topology
+(node → relay → `wsl.exe`) and the report's own topology (`wsl.exe` + an in-distro rcfile) both
+returned the **same** `{processGroupId: 0, inputWaiting: false}` at every poll, wire quiet
+between polls — no churn, no `undefined`, no throw. `processGroupId === shellPgid` is therefore
+`0 === 0`, which is *true*: on this machine the foreground leg of the strict predicate is
+satisfied trivially, and cannot explain a 300 s wait. Note `pid` is `0` for every PTY this host
+build spawns — `cmd.exe` included, measured through raw `node-pty` as well as the seam — so a
+zero-valued answer is this platform's norm, not a WSL blind spot. What is also true is that the
+rcfile topology does produce marker + literal prompt, so their contract was satisfied and the
+settle failure lives in whatever the host build they run reports; that half cannot be measured
+from a repository that does not vendor `dsh-win32-process`'s Desktop copy, and was left open at the
+time of writing. It is no longer open: the term that fails here is the host's post-marker prompt
+window, and a native Windows bash with no WSL in the picture hits it identically — see
+"Point 3's failing term, pinned" at the end of this section.
+
+**Attempting to *produce* the crash, not just to fail to reproduce it (M1-teardown, 2026-10-04).**
+Refuting a universal claim and explaining a particular reading are different jobs, so the next step
+was to give node.exe the same UNC cwd while the 9P channel was genuinely being taken away:
+`wsl --shutdown`, then boot `--version` at `\wsl.localhost\Ubuntu\home` six times through the
+teardown window, then poll until the share reads as gone, then boot again. Positive control first —
+warm, share readable, `exit 0 in 203 ms` — because a run whose control crashes proves nothing either
+way. Result: **the reporter's `Cannot read package config … connection reset by peer` appeared in 0
+of 8 cells.** Two readings out of it matter more than the zero:
+
+- The first post-`--shutdown` attempt returned **exit 0 in 4078 ms**. That number is the distro
+  auto-starting underneath the access. So on this build (WSL 3.0.1.0 / kernel 6.18.40.1) a share
+  that has gone away does not answer with a refused read — it answers by coming back.
+- Consequently my own earlier explanation — "their error is the signature of an idled-out share" —
+  is **not supported here and is withdrawn as an account of their reading**. The poll loop never
+  observed the vanished state at all (`readable=true` through 10 polls), which means that state is
+  not reachable by shutdown-racing on this machine, not that it does not exist on theirs.
+
+What is left standing is narrower than either story: point 1 is a real failure on the reporter's
+host that this machine cannot enter through the path they describe, and the discriminating fact is
+now their WSL build rather than our reasoning. `docs/compatibility-evidence.md` above keeps the
+cold/warm matrix as the refutation of the universal claim; this paragraph is the record that the
+refutation was not mistaken for an explanation. Machine state was restored after the run
+(`--terminate`, then `--shutdown` when `vmmem` held 605 MB past both distros reporting `Stopped`;
+both `Stopped` and no `vmmem` afterwards, matching the pre-run baseline).
+
+### The 267 that was mine, not the platform's (m1c/m1d, 2026-10-04)
+
+After M1-teardown, one ConPTY-gate run failed with `the interpreter wrote nothing to the ConPTY (exit {"exitCode":267} after 1580ms)` while the distro was stopped, and I read that as the production differential: node-pty (what the backend actually uses) failing at a UNC cwd where plain `child_process.spawn` does not. Two measurements killed that reading inside one turn:
+
+- **m1d** ran the production shape directly — `node-pty` from the pinned tree, the payload `node.exe`, `{UNC home, SystemRoot} × {distro stopped, distro warm}`, with a plain-spawn reading at the same instant. **All four cells: `ok`, exit 0, 154 bytes, ~1.2 s.** There is no cwd-or-state differential in the production spawn shape.
+- The gate then **passed (1534 bytes, marker + controlled prompt) when re-run under a stable interpreter**. The 267 was the interpreter path this CLI session was launched through — an `fnm_multishells\<pid>_<ts>\node.exe` directory that fnm had since removed. 267 is `ERROR_DIRECTORY`, and it named the *executable's* directory, not the UNC cwd.
+- A third artifact of the same instrument: m1c's `dir \wsl.localhost` column reported the provider root as absent **in every cell, including before the shutdown** — listing the share-list level is not a state signal on this platform, so that column measured nothing and its "8 of 8 cells with the root absent" line in the log is noise. The m1c run's real output is only the negative: 8 cells, node exits 0 at the UNC cwd in all of them.
+
+This is recorded rather than quietly dropped, because it is the same mistake the gate in `conpty-relay.mjs` was built to make: a failing instrument that produces a plausible mechanism. The M1-teardown conclusion above stands — the reporter's crash text was not produced in any cell here — and the attribution now has one fewer candidate explanation, since "share state breaks the PTY spawn shape" is refuted for the four states measured.
+
+### Point 1, re-opened: their error text IS reachable here — as a read, not as a crash (2026-10-04, later the same day)
+
+The paragraph above saying the reporter's crash was "not produced" was reached with an instrument that
+could not see the window it was about, so it is narrowed here. M1 and M1-teardown each *started a
+process* at a UNC cwd, and starting a process through the share revives the distro — every cell
+therefore measured a live provider and came back `exit 0`. Reading the path first, without spawning,
+shows the other face:
+
+| state | read `\?\UNC\wsl.localhost\package.json` | node `--version` @ `\wsl.localhost\Ubuntu\home` |
+| --- | --- | --- |
+| instance terminated, provider still advertising (first read) | **ECONNRESET: connection reset by peer** | (not attempted before the read) |
+| instance running | ENOENT at `…\Ubuntu\package.json`, UNKNOWN/ECONNRESET at the provider root, varying by cycle | **boots, exit 0**, 3 of 3 cycles |
+| after `--shutdown` | UNKNOWN | `spawn … ENOENT` |
+
+So the reporter's words — `Cannot read package config \?\UNC\wsl.localhost\package.json:
+connection reset by peer` — name a state this machine does enter: the provider root answers
+`ECONNRESET` rather than "no such file", which is the one answer that turns node's nearest
+`package.json` walk from "keep walking" into a thrown error. What is **still** not produced is node's
+own crash stack in that state, and the reason is now concrete rather than absence of evidence: the
+two conditions the crash needs are mutually exclusive in every state reachable here. When the
+provider is up, the walk stops at the share root and node boots (3/3). When the provider is
+half-gone, the read answers `ECONNRESET` but a UNC-cwd process does not start at all — the failure
+arrives one level early as a spawn `ENOENT` naming the executable, which is the same misleading
+shape already recorded for `relay-real`. Their log shows a node process that got far enough to read
+a package config, so their provider was in a third state: advertising a browsable share and resetting
+mid-walk. That is a race, and it is not a state this machine enters on command.
+
+One further measurement cut the other way and is worth keeping: `pathcheck` saw the UNC-cwd spawn
+fail with `ENOENT` in the terminated state *after* reading the provider root, while `probe-live2`
+started the shipped relay at the same workspace UNC in the same terminated state and reached the
+controlled prompt in 1172 ms. The order of the first touch therefore decides the outcome, which is
+consistent with a transient provider state and inconsistent with any standing property of
+"node + UNC cwd". Consequence for the product: point 1 stays unreproduced as a *mechanism*, and the
+mount decision now verifies the shape it would actually fail on — see the cwd row for
+`src/host/pty-readiness.ts` in [CHECK-CATALOG.md](CHECK-CATALOG.md).
+
+### Point 3's failing term, pinned: the 6-character prompt window (2026-10-04)
+
+The paragraph that left point 3 open did so because the foreground leg measured innocent and the
+300 s could not be produced. Both remaining unknowns are now settled by three runs on this machine,
+after WSL came back on its own — it had been refusing a VM with
+`Wsl/Service/CreateInstance/CreateVm/HCS/ERROR_NO_SYSTEM_RESOURCES`, and no elevated service start
+turned out to be needed: the same command returned exit 0 once free physical memory reached
+3563 MB of 15195.
+
+**The 2×2 that the earlier disagreement demanded** (`grid.mjs` — one real `BashTerminalBackend`
+session per cell, cwd `{\\wsl.localhost\\Ubuntu\\home, SystemRoot}` × instance `{running, terminated,
+running}`): **six of six cells identical** — boot 521–4637 ms, `waitReason=inferred_idle` in
+3543–3581 ms, `output=true`, `promptSeen=true`, `promptTextSeen=false`, tail `"dsh> \0"`, `pgid=0`.
+No cell threw, so the instance state that separated the two earlier baseline runs explains nothing,
+and the UNC cwd is neither slower nor crash-prone in any of those numbers — point 1's table above,
+restated through the backend instead of through `child_process`.
+
+The uniformity buys the name of the failing term, which is the same in all six: `promptTextSeen`
+did not hold in any of them. Two more bounded runs say why.
+
+- `tailbytes.mjs` recorded one raw relay session at the reporter's exact cwd through the same
+  `spawnTerminal` face (1627 bytes, two `133;D` markers). After the post-command marker the stream
+  reads `]133;D;0 BEL ESC[?2004h TAIL_OK_42 CRLF dsh> ESC[22;6H ESC[?25h` — **the command's own
+  output arrives after the marker**, and the prompt line is followed by five padding spaces.
+- `replay-tail.mjs` fed that captured stream through the host's shipped `TerminalSanitizer` and the
+  shipped `onData` body, sliced out of `dsh-terminal-bash/lib/index.js:82-236` and `:647-659` by
+  line span rather than retyped. The window fills with `TAIL_O` and the code takes its own poison
+  branch (`:657`: more than 6 characters after a marker rewrites the tail to the controlled prompt
+  plus a NUL sentinel), so the comparison at `:658` — tail equal to the prompt — is false by
+  construction. The escape that would extend the deadline cannot help either: `:725` grants
+  `promptTailGraceMs` only when the prompt *starts with* the current tail, and the sentinel is
+  longer than the prompt, so a poisoned tail is disqualified from its own grace.
+
+**This corrects a claim made earlier in this same section.** The window is 6 characters and the
+controlled prompt is 5, so a single leftover byte — the newline that ends the command's output —
+is fatal, and `promptTextSeen` is therefore a *transient*: it holds only in the interval between
+the prompt being drawn and the next printable arriving. One run caught that interval (the C1
+reproduction cell: `waitReason=stdin_read` 74 ms after the send, which is `:713` firing while the
+boot prompt still stood clean); the nine runs taken since did not, and paid `inferred_idle` at
+3.5 s. So the accurate statement is not "the strict leg can never fire" but **"`promptTextSeen` is
+not a state a command settles in reliably — which of the two paths `:713` or `:726` answers a
+command depends on byte timing we do not control."** Two candidate explanations for the
+disagreement were tested and are refuted, recorded so nobody re-runs them:
+
+- *the command's shape decides* — `cmdshape.mjs` sent the grid's short `echo`, then C1's exact
+  compound line (`echo …; pwd; whoami; false; echo exit_code=$?`), then the short form again, in
+  **one** session: `inferred_idle` 3555 / 3562 / 3584 ms, `promptTextSeen=false` in all three, the
+  tail starting `"\ndsh>"` in the last two. Command shape is not it.
+- *the byte-chunk boundary decides* — `chunkflip.mjs` fed the identical captured stream through the
+  shipped sanitizer at 1, 2, 3, 5, 7, 11, 200, 1024 and whole-buffer sizes: poisoned at **9 of 9**
+  sizes. Chunking is not it either.
+
+What is left standing is the ordering fact the raw capture shows: the marker reached the wire
+**before** the command's own output, and the earlier C1 run is a wire where that did not happen.
+Whether ConPTY emits the OSC passthrough before or after the pending cell output is not something
+this repository can influence.
+
+
+**Whether any of that is ours** — a control cell answers it: same backend, same injected contract,
+but the shell is a native Windows bash with no relay, no node in front and no WSL
+(`control-local.mjs`, this machine's `bash.exe -i` at `SystemRoot`): boot 4540 ms,
+`waitReason=inferred_idle` in 8126 ms, `promptTextSeen=false`, tail `"dsh> \0"`, `pgid=0`. The
+identical shape. So a post-marker window filled by output is a property of this host's completion
+check running against a Windows pseudo-console — not of `src/host/wsl-relay.ts`, not of `WSLENV`,
+not of the distribution; our shipped topology is no worse than the host's own local bash here. One
+nuance kept honest: the padding-after-prompt variant was seen in the `TERM=dumb` capture while the
+grid and the control ran on the backend's own environment — the poison in all three came from the
+output text, so `TERM` is not load-bearing for the conclusion.
+
+Consequences, as what changes and what does not. **Nothing in the plugin moves.** The window size,
+`idleSilenceMs` and the tail comparison are host-side (`:49`, `:51`, `:655-658`) and the preset rows
+we emit carry none of them, so there is no knob to turn and no fix to land — this is a host ask with
+a measurement attached, and it replaces the "left open" clause above rather than adding to it.
+`src/host/pty-readiness.ts` is not implicated and stays as shipped: it asserts marker + computed
+answer + prompt **on the wire**, which all six cells satisfied, and never claimed the host's internal
+predicate passes. It also gains a reason to exist beyond the wire — a shell can satisfy every part of
+the contract and still cost 3.5 s per command, and that gap is not a state a boot probe can demote a
+world for.
+
+### The host's own `bash` tool, called for real (2026-10-04)
+
+Every reading above stops one level short of the product. The grid drives `BashTerminalBackend`;
+`tests/shell-execute-shape.mjs` asserts the shape of the built file against a faked subprocess.
+Neither is `dsh-tool-bash` dispatching a call, which is the level point 4 lives at — its foreground
+path is `await (await ctx.shell.execute(ctx.shell.resolve({...request, signal}))).result()`
+(`dsh-tool-bash/lib/index.js:683`). So a context was built from the real host packages, the plugin
+mounted as `ctx.shell`, the real tool registered, and one call made:
+
+```
+tool returned in 489ms, kind=foreground
+stdout="BASH_TOOL_OK_91\n/home/ruler\nruler\nexit_code=1\n"   stderr=""
+```
+
+The computed value came back rather than the echoed command, the UNC session cwd became
+`/home/ruler`, the user is the session's, and a deliberately failing command reports its exit code
+through the tool. **This is the end-to-end confirmation that point 4 is fixed at the only level that
+matters**, and it narrows the "not yet observed inside a real host dispatch" caveat above — with one
+limit stated: it is the host's tool dispatch and the host's WSL executor, not the Desktop UI, and it
+exercises the **one-shot** path. The persistent path is covered by the grid, not by this call.
+
+The same driver run against a mutant — the shipped `lib/shell.js` with `execute` renamed — fails with
+`ctx.shell.execute is not a function` at `:683`, on both planes. That is the 0.7.5 shape reproducing
+the reporter's complaint through the host's own code, which is what makes the green above a
+measurement rather than a demo. It is now a gate: `scripts/compatibility/tool-bash-real.mjs`, wired
+into `ci.yml#wsl-gate` on both planes and into the compat case's `Run-Checks.ps1`, with 10 counted
+checks so a short run cannot report green.
+
+One instrument note, recorded because it looked like a product defect for a minute: with an `exec`
+whose session had no `id`, the host's `shellEnv.collect()` returned `DSH_SESSION_ID: undefined` and
+our `withWslEnv` crashed in `isWindowsPathShaped`. Giving the fixture a session id made it disappear,
+so it is **our incomplete stand-in, not the plugin** — a real session always carries an id — and no
+production code was changed for it. The lesson is the one already written down twice in this file: a
+driver's fixture must match the runtime's shape, or its red is about the driver.
+
+## The hang is a Windows-console-path property; the WSL1 runner does not have it (2026-10-04)
+
+The session-tier gate (`scripts/compatibility/bash-session-real.mjs`) ran on both machines inside
+one hour, and the persistent-shell half of its result differs:
+
+| where | the host's PTY tier, one `echo` | our session tier, same command |
+| --- | --- | --- |
+| this machine: Win10 + WSL2 + Desktop 0.2.x | **timed out** — 303.8 s in the real Desktop session, 8 s when the deadline was shortened | first call 3.9 s including boot, ~30 ms after |
+| `ci.yml#wsl-gate`: windows-latest + **WSL1** Ubuntu-24.04 | **answered in 0.52–0.59 s, cleanly** | 11/13 on both planes; the 2 reds are named below |
+
+Two statements come out of that, of different kinds. The product one is unchanged: the failure mode
+is real on the desktop path we ship into, and the session tier answers there. The gate one is a
+correction of my own overreach — the driver's last cell asserted that the PTY tier *must* hang,
+which promoted one machine's pseudo-console behaviour to a universal expectation, and the runner
+disproved it in half a second. That cell now asserts only that the control ran, and prints which
+outcome it saw; the hang stays where evidence belongs, in this file. The other red was the same
+class of mistake in smaller form: `sudo -n true` returns 1 here and **0** on the runner, whose root
+is NOPASSWD, so the assertion is now boundedness (`< 8 s`, not timed out), not the exit code.
+
+The mechanism claim the two frames support jointly is narrower and better: the sentinel is corrupted
+by **repaint padding on the Windows console path** — which is also why a native Windows bash hits
+the sibling predicate (the 6-character prompt window) on this machine, and why a WSL1 instance
+behind a different terminal stack hits neither. It is not "WSL is slow" and not "the command is
+complex".
+
+And one planning consequence, said plainly: **`ci.yml#wsl-gate` cannot catch this bug.** A green
+WSL1 frame establishes that our session protocol works; it establishes nothing about the PTY tier's
+hang, because that tier does not hang there. The frames that can see it are this machine and a real
+Desktop session — which is why the Desktop reading is still on the list rather than assumed covered.
+
+## The host's plugin loader unwraps `exports.default`, and my driver did not (2026-10-04)
+
+The Desktop E2E pass over the session tier failed, and the product's own transcript
+(`~/.dsh/sessions/--wsl.localhost-Ubuntu-home-ruler--/session-b7b8f571-…/session.v4.jsonl.zstd`,
+read back with `D:\Temp\issue51-matrix\count-in-transcript.mjs`) says why:
+
+| seq | what the log holds |
+| --- | --- |
+| 21, 33, 49 | the **PTY** tier still in place: three calls each burned the host's 300 s deadline |
+| 73 | `Error: invalid arguments: missing required property "description"` — the model's first call after our tool replaced the PTY one |
+| 81, 86, 94 | `Error: cannot get property "subprocess" without inject`, three tool results, 15 mentions of the string across the log |
+| 105 onward | the agent gave up on `bash` and pivoted to `bash_background` — 9 `started background job` |
+
+The last two rows answer the question "why did the working directory and the exported variable not
+survive": they were never run by the session shell. Every `bash` call errored at the seam, and the
+model's workaround was the background-job tool, whose jobs are separate processes — so `export` in
+one job cannot be seen by the next. The persistence cells in the driver were green; the calls the
+model actually made were not ours.
+
+Row 73 is **not** a defect: the host's own one-shot tool declares `description` required too
+(`@deepseek-ai/dsh-tool-bash/lib/index.js:496-499`), so a model omitting it gets the same error from
+the tool this plugin replaces. Row 81 is ours.
+
+### The mechanism
+
+`cordis-plugin-loader` normalises a module before mounting it — `unwrapExports` returns
+`exports.default ?? exports` (`lib/index.js:663-669`), and `Context.registry.plugin` then reads
+`plugin.inject` and `plugin.Config` off whatever it got (`cordis/lib/index.js:1635`). A module whose
+default export is a **bare function** therefore arrives with no `inject`: the fiber has no declared
+service, the proxy trap refuses the property, and the message is exactly
+`cannot get property "subprocess" without inject` (`cordis/lib/index.js:676`). The one-shot executor
+never showed this because its default export is a **class** carrying `static inject`
+(`src/shell.ts:159,543`), which survives the same unwrap.
+
+So `export const inject = ['subprocess']` in `src/host/wsl-bash-tool.ts` was a declaration nothing
+read. The fix is the one this repository already uses everywhere else — resolve the seam with
+`ctx.get('subprocess')`, which is documented as the read that bypasses the inject requirement
+(`cordis/lib/index.js:756`) — in `wsl-bash-tool.ts`, and the tool now fails with
+`this host exposes no subprocess service` if the service genuinely is not there.
+
+### Why 13/13 could coexist with every real call failing
+
+The driver mounted the plugin as `ctx.plugin(moduleObject)`, and cordis does read `inject` off a
+module object. The product mounts `moduleObject.default`. Same file, same config, opposite outcome —
+the driver was measuring a channel the product does not use. `bash-session-real.mjs` now calls
+`ctx.plugin(sessionTool.default ?? sessionTool)`, which is the loader's shape; it went red with the
+Desktop message verbatim before the one-line product fix and 13/13 after, on both planes:
+
+| plane | first call | after that | the PTY control, same command |
+| --- | --- | --- | --- |
+| `src` | 520 ms (session boot included) | 22-34 ms | did **not** answer inside 8 s — `Your command timed out after 8 seconds` |
+| `lib` | ~500 ms | ~30 ms | answered in 4256 ms |
+
+The control needed its own correction. `dsh-terminal-bash` builds the PTY child's environment
+itself — a fixed set, `TERM`/`PS1`/`PROMPT_COMMAND`/`DSH_SESSION_ID` (`lib/index.js:936-955`) — so
+`DSH_WSL_USER` set in the driver's process never reaches the relay, and the shell comes up as the
+distribution's default user. Pointed at the driver's own session directory (`…\Ubuntu\root`) it died
+with `chdir(/root) Permission denied` and the cell reported "PTY shell exited during startup": a
+control that cannot start is the vacuous green this file already names twice. It now starts in
+`/tmp`, which every user can enter, and the command being compared does not depend on the directory.
+Its two outcomes above, hang here and answer there in the same hour, are why the cell asserts only
+that the control ran.
+
+## Every Desktop call carried a fragment of its own frame (2026-10-04, after the seam fix)
+
+The seam fix worked, and the user's reading of the new run was right in a different way. The seven
+prompts all answered fast — `PROBE_6` + `/home/ruler` + `ruler` in 523 ms, `cd /tmp` then `pwd` →
+`/tmp`, `READ_BACK=kept_42`, `false` → `[exit code: 1]`, `sudo -n true` → 114 ms — and every one of
+them also carried this in its body:
+
+```
+[stderr]
+<b9-31ba5cefb5f0' "$( { export -p; printf 'PWD=%s\n' "$PWD"; } | base64 -w0 )"
+```
+
+That is our own framing, and the model was reading it on every call. The driver reported 13/13.
+
+### What the bytes actually do
+
+Instrumented at the raw pipe (`D:\Temp\issue51-matrix\stderr-windows.mjs`, then the session's own
+windows in `stderr-windows2.mjs`): bash echoes each line it reads to stderr, but the echo of a frame
+does not arrive as the line. Measured chunk for chunk:
+
+| what arrived on stderr | bytes |
+| --- | --- |
+| the prompt text, as its own chunk | 10 (`bash-5.1$ `) |
+| then a `\r` followed by **the last 78 bytes of the frame line**, starting in the middle of the nonce | 80 |
+| the frame's two records, on stdout as designed | 59 + 1660 |
+
+So the head of the echoed line — where the payload and both record tags live — is never written. The
+first version of the fix assumed the echo was cut by *my* window boundaries and made the windows
+line-aligned (`takeStderr` in `wsl-bash-session.ts`); measuring again showed the cut is the shell's,
+one frame per chunk, terminated by a newline, unrecognisable by payload or tag. Line alignment is
+still correct and stays, but what closes the leak is recognising the frame by text that only a frame
+contains: `RECORD_TAG`, `STATE_TAG`, `__dsh_status`, and the state-report command itself
+(`FRAME_SIGNATURES` in `wsl-bash-protocol.ts`).
+
+### The instrument lesson, which is the same one as issue #51
+
+This is the sentinel-scrape failure again, one layer down. My first two filters keyed on bytes the
+shell chose how to deliver — the payload, then the tags — and both were in the part that did not
+arrive. The rule that survives is the one the plan wrote for the completion check: never recognise
+protocol by a rendering; recognise it by text that exists only in what we ourselves wrote.
+
+The gate cell that now enforces it read the **rendered body** (`output.render`, which composes stdout
+plus `[stderr]`) instead of `stdout.text`, because every one of the thirteen existing cells looked at
+`stdout.text` and the leak was outside all of them. Two cells went in, and the first was written
+deliberately weak to test the test: keyed on `__DSH_WSL_BASH`, `eval "$(printf %s` and
+`| base64 -d)"` it reported green on a run whose every body still held the fragment. Keyed on the
+frame's own `{ export -p;` text it went **11 of 11 red**, and green after the `FRAME_SIGNATURES`
+change: `15/15` here on both planes and as both users (`root`, `ruler`), with the companion positive
+control (`echo oops >&2` → `[stderr]\noops\n`) riding along so a filter that dropped all stderr could
+not pass either.
+
+## A day of bash, and the three things it was not yet doing (2026-10-04)
+
+With the leak closed, the question became the user's: do *ordinary* commands behave as an ordinary
+shell? A matrix of 34 everyday commands through the mounted tool
+(`D:\Temp\issue51-matrix\common-ops\probe.mjs`) ran twice, before and after the changes it caused.
+Every row that passed, passed in 20-300 ms: `cd` chains, `ls`/glob, pipes, `grep -c`, heredocs,
+command substitution, `for` loops, quoting, `tar` round-trip, `find`, `sed -i`, `awk`,
+`git init`+`commit`+`log`, `node -v` / `python3 -V` / `npm -v` resolving from the sourced login
+environment, CJK, 20 000-line output, `export` read back in the next call, `pipefail` shape, `&` with
+`wait`.
+
+Four readings were not everyday-good, and all four were product behaviour rather than shell semantics:
+
+| reading | what it meant |
+| --- | --- |
+| `sleep 30` with an 8 s deadline took **16 485 ms** | the recovery path re-executed the frame, so the deadline was spent twice |
+| `echo run >> f; sleep 6` left **two** lines in `f` | the same retry repeats effects — a second `git commit`, a second `curl -X POST` |
+| the call after a cancelled `sleep 20` took **18 520 ms** | a cancel did not stop the command, so the next call queued behind it |
+| `sudo true` | 6 000 ms, `(no output)`, `[timed out after 6000ms]` — while the README claimed a bounded failure *and a message* |
+
+The first two are one bug: `run()` rebuilt the session and then ran the command again. It now rebuilds
+on any non-settle — which is what frees the shell — but re-executes only when the child was already
+gone, because that is the one case where the command demonstrably did not finish. The third: a caller
+cancel now throws the host's own shape (`dsh-tool-bash`'s `toolAborted()`, an `AbortError` reading
+`tool call aborted`) instead of returning a result that renders as `[exit code: 1]`, which would tell
+the model the user's command had failed.
+
+The fourth was the plan's step 4, never built: the README asserted a message that the code did not
+produce. Implemented as `src/host/wsl-bash-tty.ts` — `script -qec` started inside the session, with the
+records still written by the frame *outside* it, so escalation cannot reach the protocol; the command's
+first word decides, `tty: true` forces it. Measured after: `sudo true` 45-54 ms with sudo's own
+verdict, `stty size` → `24 80`, `tty` → `/dev/pts/N`, and the pty's `\r\r\n` folded back into plain
+text (`normaliseTtyOutput`) before the model reads it. `stty` has to run *inside* the pty — set
+outside, `stty size` answered `0 0` while `tty` still reported a pts. `less` and `ssh` came back
+healthy without escalation, which is why the whitelist is the narrow list it is.
+
+### Two readings that were about my instrument, not the shell
+
+The matrix's `cancel bounded` row reported NOTE on the second run — because the fixture still expected
+a return value where the product now throws. Stale instrument, fixed in the instrument.
+
+And the new `sudo` cell first asserted the word `password`, which is a fact about *this
+distribution's sudoers*: as `ruler` sudo asks, as `root` (this machine's other user, and the WSL1
+runner's) it is NOPASSWD and answers `(no output)` with exit 0. The cell now asserts the universal
+property — escalated, inside budget, sudo's own verdict — and the run is 22/22 as both users on both
+planes. That is the third time in this issue that a machine-specific reading was written as a rule;
+the check that belongs to me is whether an assertion survives changing users.
+
+
+
+
+## Round two: what a day of bash costs, and where it still differs from the other bash (2026-10-05)
+
+Four measurements were taken before any of this round's code, in `D:\Temp\wsl-bash-round2\`.
+
+**Frame length.** A command travels as one line, so the question is what one line costs. Payload of
+1 kB → 55 ms; 8 kB → 110 ms; 16 kB → 303 ms; 32 kB → 1 039 ms; 64 kB → 3 840 ms; 96 kB → 8 499 ms;
+128 kB → 15 108 ms; 256 kB → 59 256 ms. **Nothing was truncated at any size** — each frame answered
+with the exact byte count it asked for — which closes the P0 question this round opened with: an
+unclosed quote, an unterminated heredoc, a dangling `|` and an unclosed `for` each settle with bash's
+own syntax error (exit 2) in 21-484 ms, and the next command answers normally (`SURVIVED_42`,
+29 ms), because the command text never reaches bash as input lines — it is decoded inside `eval`.
+The cost is latency that grows with length, recorded as `behaviour-long-frame-latency`.
+
+**Journal size.** `export -p` is 2 471 bytes, `set +o` 542, `shopt -p` 1 086 — but `declare -f` after
+this machine's rc files is **61 083 bytes across 85 functions**. That is why the bodies ride only on
+the frame where the function count moved, and why the cap reports itself: an unconditional snapshot
+would put ~81 kB of base64 through the pipe per command to repeat something that changes almost never.
+
+**Rebuild replay, and the parse-time trap.** Sending the whole journal as one command failed with
+`syntax error near unexpected token '('` and exit 2: `eval` parses its entire string before running
+any of it, so `shopt -s extglob` on line 50 cannot help the bash-completion function on line 1623
+that needs extglob *to be parsed*. Symptom worth remembering — the restart reported success, 91
+functions came back (from re-sourcing rc) and the function the user defined two calls earlier did
+not. Fixed by chunking the restore (bootstrap, options, environment, functions, `cd`), each its own
+frame. Two smaller bugs found on the way: the frame's definition-detection regex missed
+`eval "dshbig$i() { …"` because it demanded a delimiter before the name, and the over-cap marker
+printed the literal `$__dsh_s` inside single quotes instead of a number.
+
+**Detached processes.** Killing `wsl.exe` takes the shell's ordinary children with it (0 survivors,
+twice) but not ones that detached themselves: `setsid sleep 45` and `nohup sleep 46 &` both lived
+(2/2). The reaper therefore matches a `DSH_WSL_SESSION` token in `/proc/*/environ`.
+
+**Correction, same day (2026-10-05).** The sentence above ended "and the control that makes the cell
+mean something is a sleep started **without** the token: it must survive, and it does." It does not.
+A `setsid sleep 40` whose `wsl.exe` exits **normally** is gone immediately on this machine's WSL2 —
+measured `DEAD` at t=0 with the instance demonstrably up (`echo $$` answered in the same PID range) —
+and the distinction is survival of the *session*, not of the shell: the 2/2 reading was a child of a
+shell killed **abnormally**. So the control as written was never a live process, the mis-kill guard
+underneath the reap cell was vacuous, and nothing asserted `outsideState` anyway. The cell now holds
+its control open with a `wsl.exe` of its own (`exec sleep 41`, launcher still running: measured
+`COUNT=1`, and `COUNT=0` after killing the launcher), counts the session's child by its duration
+before and after the rebuild, and asserts both.
+
+**Footprint, measured on this machine.** One session costs about **9.1 MB of Windows working set
+across two `wsl.exe` processes** (3 sessions → 6 processes, 54.7 MB total) plus **3.4 MB of RSS for
+the bash inside the distribution**; `vmmem` stayed at 552 MB whether shells were up or not, and free
+physical memory returned from 2 521 MB to 2 640 MB when the shells were killed. Disk: the shipped
+`lib/` is 633 kB total, of which this tool's chunk is 24.83 kB (with a map of similar size). Nothing
+is written at runtime until a stream overflows, and a spill file is now per command — measured
+before that fix, every probe after a 200 000-line command reported the earlier command's spill path,
+which `bash-parity-real` caught as an undeclared difference.
+
+**Differential result.** With the same per-stream cap on both sides, 6 of 10 comparable probes agree
+exactly on the fields that matter (including the spill file's line count, 200 000 in both worlds) and
+3 differ in ways now written into [bash-parity.md](bash-parity.md): `$-` (`himBs` vs `hBc`, because
+interactive mode is what buys aliases and functions), the layer that reports a missing `workdir`
+(`wsl.exe`'s `chdir … failed 2` there, bash's own `cd:` error here), and state persisting here but not
+in a one-shot call. 2 probes are **not covered** — the host's background and promote paths need a jobs
+registry the in-process harness does not mount, and saying so is the point of the row rather than
+silently dropping it.
+
+## The nine clicks, read from the product's own transcript (2026-10-05, Desktop 0.2.x)
+
+He ran them in a real Desktop session in this WSL workspace (`~/.dsh/sessions/--wsl.localhost-Ubuntu-home-ruler--/session-b7b8f571-…`,
+`session.v4.jsonl.zstd`, 623 events, transcript written 2026-10-05 08:02 local). Read out of the file
+rather than retold: 51 `tool/call` / `tool/result` pairs — `bash` 25, `bash_background` 9, `job_output`
+10, `read` 6, `glob` 1. The newest nine `bash` results are the nine prompts; the earlier ones in the
+same file are the *previous* round's traffic and are excluded below (they show two defects already
+fixed, including three calls answered by the host's persistent tier with
+`Your command timed out after 300 seconds`).
+
+| prompt | what the product returned | reading |
+| --- | --- | --- |
+| `echo PROBE_$((21*2)); pwd; whoami` | `PROBE_42 /home/ruler ruler` | answers, and **0 of the 9 newest bodies carry a frame signature** — the leak check's own signature list run against the product's transcript |
+| `cd /tmp && export DSH51=kept_$((6*7))` then `pwd; echo READ_BACK=$DSH51` | `/tmp READ_BACK=kept_42` | directory and export cross the call boundary |
+| `seq 1 200000` | 49 931 bytes kept, `[output truncated; full output: …\dsh-subprocess-…-stdout.log]`, then the host's own `(Omitted 470266 bytes. Full formatted result stored at: D:\Temp\dsh-spill-…)` | spill works and the two layers stack without fighting; the model is pointed at a file twice, once by us and once by the host's retention layer |
+| `echo run >> /tmp/x51; sleep 6` then `wc -l /tmp/x51` | `1 /tmp/x51` | **exactly-once holds inside the product** — the timeout-replay defect's fix confirmed at the tier it was found in |
+| `alias m51='echo ALIAS_OK_7'; m51` | `[stderr] Command 'm51' not found, did you mean: … [exit code: 127]` | **not our defect, and not a difference from bash**: measured the same day on this distribution, `bash -ic "alias m51p=echo; m51p HI"` also answers `m51p: command not found`, while feeding the two as separate lines to `bash -i` answers `HI`. Aliases resolve when bash *parses* a line, so an alias is usable on the following call and never on the one that defines it — which is what the session tier gives (the row above, and `bash-session-real`'s replay cell). The sentence differs from the one-shot path only in who prints it, now `behaviour-command-not-found` |
+| `sudo true` | `[sudo] password for ruler: sudo: no password was provided / sudo: a password is required [exit code: 1]` | the escalation reached sudo (a prompt was delivered and answered inside the deadline, not the old burn-6 s-then-timeout), and this distribution's `ruler` is **not** NOPASSWD — so "sudo 用不了" is sudoers, not the shell. What we could fix is the silence about it: the body now says so (`…this shell has nobody to type it: run the session as a user with NOPASSWD, or as root`), gated by a cell that asserts the note rides the complaint and does not appear where no complaint is printed |
+| `stty size; tty` | `not a tty` + `stty: 'standard input': Inappropriate ioctl for device`, exit 1 | the declared `behaviour-no-tty` difference, in the product |
+| the one `glob` in the file | `Error: glob search failed inside the distribution (exit 1): find: '/tmp/systemd-private-…': Permission denied` | **the host's own classification, mirrored**: `dsh-tool-fs-search/lib/index.js` has `classifyRunFailure(…) → new SearchError(… "SEARCH_FAILED")` for a non-zero exit with stderr, so a directory containing an unreadable subdirectory fails the search in both worlds. Recorded, not fixed here — changing it would move us off the host's contract that `tests/wsl-search.test.ts` holds |
+
+## Isolation between agents, and the leak the first cell found (2026-10-05)
+
+`bash-session-real` grew six cells for the boundaries nobody had driven: a second agent arriving
+through the same registered tool, two calls in one flight, a rebuild's reaper aimed at another
+agent's processes, that other agent's shell after a rebuild, and one agent's scope ending while the
+other keeps working.
+
+Four passed on the first run and one **failed with a number that names the defect**:
+`{"bDisposers":0,"beforeAgentEnd":6,"afterAgentEnd":6}` — the tool registered a disposer on the
+*plugin* scope only, so every agent that ever called `bash` left its shell alive (two `wsl.exe`,
+≈9 MB of Windows working set each) until the whole world was disposed. The fix is the registration
+the agent scope was asking for (`exec.agent.ctx.effect`, cordis's own scope hook: the function it
+returns runs when that agent ends). After it, on both planes:
+`{"bDisposers":1,"beforeAgentEnd":6,"afterAgentEnd":4,"a":"A_AFTER_B_25"}` — one agent's scope ending
+takes exactly its two `wsl.exe`, the other agent still answers, and the plugin's own dispose still
+takes what is left (`4 → 2`). State isolation was never the problem: a second agent saw
+`/home/ruler ISO=[]` while the first kept `/tmp ISO=from_A_42`, a concurrent pair settled
+`{"one":"ONE_4","two":"TWO_8"}`, and a rebuild left the other session's detached child alone
+(`beforeForeignReap:1, afterForeignReap:1`). 39 checks ran green on `src` and `lib` before the sudo
+note cell was added, 40 after; the parity driver went to 11 probes with `alias used on the line that
+defines it: differs, as behaviour-command-not-found`.
+
+**Not covered by this pass, named:** two *Desktop windows* (two separate host processes, two plugin
+instances) are not driven by anything — the isolation cells cover agents inside one mounted world;
+`job_list` visibility across agents belongs to the host's jobs registry, which the harness stubs; and
+the `dsh-spill-*` directory the host's retention layer writes is the host's lifecycle, not ours.
+
+## The pseudo-terminal's seams, driven rather than reasoned about (2026-10-05)
+
+Two scratch drivers mounted the registered `bash` through `ctx.plugin` and called it with the shapes a
+model actually writes, each call bounded by its own `timeoutMs` (files under `D:\Temp\wsl-bash-round2`,
+outside the repository; nothing installed, no Desktop instance touched). Readings on this machine
+(WSL2, `Ubuntu`, user `ruler`, whose sudoers is **not** NOPASSWD):
+
+| the call | what came back | what it says |
+| --- | --- | --- |
+| `echo out; echo err >&2`, `tty: true` | `out err ` — **no `[stderr]` section** | a terminal has one stream; separation exists only on the pipe. Mechanism, and the same for the host's PTY tier |
+| `echo out; echo err >&2`, plain | `out [stderr] err ` | the contract the ledger already describes |
+| `man ls` (auto-escalated) | 743 ms, `N\bNA\bAM\bME\bE ls - list …` | emphasis reaches the model as overstrike — unreadable, and the fold never saw it |
+| `man ls \| head -c 120` (plain) | `LS(1) … LS(1)\n\nNAME\n` | clean, because `man` writes overstrike only when it is on a terminal |
+| `bash -c 'sudo true'` | **5289 ms, `timedOut: true`, `(no output)`, plus a session rebuild** | the issue's own symptom one layer in: the decision read the first word, which was `bash` |
+| `sudo true` | 46 ms, `[sudo] password for ruler: … a password is required`, exit 1 | the escalation works; the distribution, not the shell, is what needs a password |
+| `less /etc/hostname` | 6076 ms, `WARNING: terminal is not fully functional Press RETURN to continue`, timeout + rebuild | the frame gives the pty `/dev/null` for input, so a program waiting for a key gets EOF-ish noise and burns its deadline |
+| `vim /etc/hostname` | 5715 ms, `"/etc/hostname" [readonly] 1L, 9B`, timeout | same class; it opened read-only and did not touch the file |
+| `top` | 6124 ms, a screen dump, timeout | same class, and it costs CPU while it waits |
+| `top -bn1 \| head -3` | 222 ms, batch output | batch mode needs no terminal, yet the first-word rule escalated it anyway |
+| `cat`, `tty: true` | 82 ms, `(no output)` | input really is `/dev/null`: a reader sees EOF at once rather than hanging |
+| `sleep 45`, `tty: true`, aborted at 800 ms | `AbortError` at 2922 ms, then `SLEEP=0 SCRIPT=0` | cancelling an escalated call takes the inner program with it — the leak a `setsid` child showed on rebuild is not present here |
+| `sudo true` after the fix | body ends `[sudo asked for a password and this shell has nobody to type it: run the session as a user with NOPASSWD, or as root]` | the added note, gated by a cell that asserts the note and the complaint appear together |
+
+Three of those were defects and are fixed here: the overstrike fold (`N\bN`→`N`, `_\bX`→`X`, the two
+shapes actually measured — a bare `.\b` deletion rule was tried first and ate characters, which the
+unit test now pins), the wrapper read (one layer; an unreadable wrapper is left alone rather than
+escalated on a guess), and `tty: false` as a veto (measured: with only `true` honoured, `man ls`
+`tty: false` came back byte-identical to the escalated call). Two cells went into `bash-session-real`
+for the first two — the fold is asserted on the exact bytes rather than on `man`, because whether `man`
+reaches its pager at all is a property of the distribution, not of this plugin — and the veto is
+asserted offline, since the only live way to see it would be to let a program hang.
+**42/42 on both planes**, and `12/12` on the parity driver's two planes with the single-stream probe
+added (14 probes, the two the one-shot world cannot answer still skipped and named); unit 160 tests /
+0 fail, node 72/72, docs 11/11, typecheck still 209.
+
+Two more rows went into the ledger: `behaviour-escalated-streams` (one stream, mechanism, with a probe
+that shows it) and `behaviour-overstrike` (the fold), and `param-tty` now states all three of its
+values. A duplicated ledger row id was introduced and removed during this pass, found by `grep` rather
+than by the gates — `tests/wsl-bash-parity.test.ts` already asserts ids are unique, and the duplicate
+was cleared before that bucket was run, so the gate never got to say anything about it.
+
+**Then the list became classes, on agent-cost grounds.** The default per-call deadline is 120 s
+(`timeoutMs: 120_000`, max 600 s), and a program waiting for a keyboard that never arrives cannot be
+satisfied inside any deadline — so the question was not "does it get a terminal" but "what does an
+agent pay for the guess". Three sets, each with its own treatment:
+
+| class | members | terminal | deadline | why |
+| --- | --- | --- | --- | --- |
+| credential | `sudo su doas ssh scp sftp rsync passwd chpasswd gpg ssh-copy-id ssh-keygen mysql mariadb psql sqlplus redis-cli mongosh` (18) | always | as configured | nothing else answers them; escalated, `sudo` returns in 46-166 ms with its own words |
+| keyboard | `vim vi nvim view nano pico emacs ed tmux screen telnet ftp` (12) | always | **8 s**, and only when the call names neither `tty` nor `timeoutMs` | an agent does write the batch forms (`vim -es -c '…' -c wq`, `tmux new -d 'cmd'`), so refusing outright would close a door; waiting two minutes to say "no keyboard" is the worst of the three |
+| optional | `htop top less more pg man info gh az gcloud aws virsh mongod` (13) | never, unless asked | — | each has a pipe form that is strictly better: measured `man ls` on the pipe = 177 ms and the whole page, auto-escalated = 743 ms into a pager; `top -bn1`, `gh --version`, `mongod --version` print and exit |
+
+The bound is asserted on the **bound** (`value.timeoutMs === 8000`), not on the hang, because whether
+`vim` hangs or exits is the distribution's business — a runner without `vim` still shows the cap
+applied. Writing the classes also found a dead letter: `firstWord` stopped at a hyphen, so
+`ssh-copy-id`, `ssh-keygen` and `redis-cli` were in the whitelist and could never match anything. They
+can now, which is a behaviour change for three commands and is said so in the changelog rather than
+slipped in. Measured after the change, both planes: `man ls > /dev/null; tty` ⇒
+`{"ms":177,"tail":"RC=0 not a tty"}`, `vim /etc/hostname` ⇒
+`{"ms":9634,"deadline":8000,"timedOut":true,"note":true}`.
+
+**Left unmeasured, and what it would take:** a distribution without `script` (only Ubuntu is installed
+here, so the fallback is untested and would surface as `script: command not found` for a `sudo` call);
+`sudo`'s behaviour under `Defaults requiretty`; wrappers deeper than one layer
+(`bash -c "bash -c 'sudo x'"`); and whether `script` propagates an inner exit code on every util-linux
+version (it did here: sudo's `1` came back). Unchanged by this pass: an escalated call still has one
+stream, and the keyboard class still costs 8 s plus a session rebuild when it is genuinely run
+interactively — bounded now, not eliminated.
+
+## Cloud frame 37221289492, read step by step, and the cell that turned out to be about the fixture (2026-10-05)
+
+Dispatched on `fix/issue51-shell-execute-seam` at head `21b8ee6`. Job conclusions:
+`gates on the committed artifact plane (ubuntu)` **success**, `node buckets against the pinned host
+tree (ubuntu)` **success**, `real-WSL hard gates (windows + WSL1 Ubuntu)` **failure** — one step,
+`run every WSL gate`, with `every gate must say which plane it loaded` **success** after it.
+
+The pure-node bucket being green is the point of this frame: the previous one (37220551085) died in
+that step, because `tests/wsl-bash-parity.test.ts` was filed under `test:unit`, which runs after
+`npm ci` with no host packages installed, and it imports the module that imports
+`@deepseek-ai/schemastery` — `ERR_MODULE_NOT_FOUND` at load, before a single assert. Locally that is
+invisible: the development tree has the pinned packages hoisted, which is the exact property the
+bucket is defined by not having.
+
+From the job's own `wsl-gate-logs` artefact, per gate: `smoke`, `exec-shape`, `shell-extra`,
+`make-smoke-built`, `smoke-built`, `fs-real`, `skills-real`, `search-real`, `relay-real`,
+`tool-bash-real` PASS on the `src` plane; `bash-parity-real` 10/10; `bash-session-real` **32/33** —
+the failing cell being `a detached child of the session is reaped on restart`, payload
+`{"note":"…[2 detached processes from the previous shell were stopped]","outsideState":"ALIVE",
+"sleepCount":"2"}`. On the `lib` plane of the **same frame** every gate PASSed and
+`bash-session-real` reported **33/33**.
+
+Same commit, same machine, different plane, different answer: that is a device reading, not a product
+one, and the artefact says which. The cell asserted `pgrep -c -x sleep <= 1` after the rebuild. The
+job's own `fixture preparation` step starts a `nohup sleep 900` on purpose (the 9P share disappears
+when the instance idles out), so a correct reaper still saw 2 processes named `sleep` — the keep-warm
+and the outside control — and the `src` plane was red for counting them. The `lib` plane then passed
+because the `src` plane's cleanup line `pkill -x sleep` had killed the CI fixture's keep-warm, a
+process the driver does not own, in a distribution the rest of the job continues to use. Rewritten to
+count by the duration each probe carries, to assert before and after, to hold its control open with a
+launcher of its own, and to clean up by pattern instead of by process name.
+
+Controls run on this machine after the rewrite (WSL2, `Ubuntu`, user `ruler`): `src` plane 33/33 and
+`lib` plane 33/33, cell payload `{"beforeReap":1,"afterReap":0,"controlAlive":1}`; mutation control —
+`kill -9` → `kill -0` inside the reaper script, which still counts and still claims
+"[1 detached process … was stopped]" — FAIL `{"beforeReap":1,"afterReap":1}`, then restored
+byte-identical (`git diff --stat` empty for that file) and re-green 33/33.
+
+**Not covered by this frame, named rather than folded into the green:** `compat.yml` did not run (it
+is a separate workflow on its own schedule), `scripts/compatibility/installed-copy.mjs` is not wired
+into `ci.yml` at all (it needs this machine's Desktop profile), and the reap cell was checked only for
+the `sleep`-named probes — the 4 000-function journal cell and the spill cell were not re-instrumented.
+
+The first gap was closed the same evening: `compat.yml` dispatched on this branch at head `9d91b78`
+(frame **37223406931**, the whole rolling window, repo is PUBLIC so the Windows minutes are not
+billed). `read-window` ✓, and one job per entry, each ending `verify-dsh-compat: OK — 1 verdict(s),
+all PASS compatible` with its own verdict line: `0.2.0-rc.2 PASS compatible`, `0.2.0-rc.1 PASS
+compatible`, `0.1.7-rc.2 PASS compatible`. Those jobs pack the **working tree** and install that tarball
+(the step is named `pack and unpack the working tree (never test a published artifact for an
+unpublished commit)`), so this is the first compat pass that ever carried the session `bash`, and the
+rc.2 log shows the new chunk in the pack (`lib/wsl-bash-tool-C7flW-l_.js`, 49.4 kB with an 88.7 kB map).
+What the compat matrix does **not** look at, stated because a green there is often read as more than
+it is: it probes install → boot → the plugin's HTTP route → uninstall → reprobe (`✔ no plugin errors
+in the boot log`, `✔ plugin route gone after removal (405)`), and never enumerates which tools
+mounted — so it does not say whether the persistent-bash world came up on that runner, and it is not
+evidence about `bash` behaviour. The behaviour claim is `bash-session-real` / `bash-parity-real` above.
+
+
+## The checklist driven through a real dsh session (2026-10-05, second round)
+
+Everything above drives the tool from a harness. This section is the same commands sent through the
+product's own agent loop, so the readings are the bytes a model would read.
+
+**How it was run, and what it did not touch.** `E:\dsh-plugins\docs\PLUGIN-RULES.md` §H.5/§H.7 records
+the official surfaces, so no new device was invented: the installed 0.2.0-rc.2 CLI was launched over
+channel ② (`ELECTRON_RUN_AS_NODE=1` + `--expose-internals` on the `app.asar` tree) as `--profile web
+--no-open --host 127.0.0.1 --port 19411` with `DSH_HOME=D:\Temp\issue51-dsh-drive\home`; the plugin was
+installed into that profile with `dsh plugin --profile web add file:…`; the model was the local scripted
+provider `E:\dsh-plugins\tools\mock-llm-provider\server.mjs` on 19410, declared as a `ck51mock` route in
+the profile patch — **so no inference request was bought and DeepSeek's balance was not used**. The
+session was created and prompted over the host's own remotes (`session/create`, `session/prompt`) after
+exchanging the launch token for the cookie, and the answers were read back from the session's own
+durable log (`session.v4.jsonl.zstd`, 87 frames, decoded frame by frame). The user's running instance
+(19387, PID 21164) was never connected to: both ports were confirmed to have **0 listeners** after
+teardown and 19387 still had its original owner.
+
+Two passes, because one fixture could not ask the question. Pass one prefixed each command with a
+`printf` marker so the scripted provider could find its place in the history — and that prefix turned out
+to change what the tool does, so pass two re-sent the six terminal-shaped commands exactly as a model
+writes them.
+
+### Pass one — 27 rows, marker-prefixed (times are `tool/result.time − tool/call.time` from the log)
+
+| # | the call | ms | what the product returned |
+| --- | --- | --- | --- |
+| 1 | `pwd` | 655 | /home/ruler/ck51-workspace |
+| 2 | `export CK51_VAR=hello42; echo set=$?` | 36 | set=0 |
+| 3 | `echo "[$CK51_VAR]"` | 39 | [hello42] |
+| 4 | `cd /tmp && pwd` | 35 | /tmp |
+| 5 | `pwd` | 30 | /tmp |
+| 6 | `cat > ck51-note.txt <<'CK51EOF' line one $notexpand...` | 36 | 2 |
+| 7 | `cat ck51-note.txt` | 27 | line one $notexpanded `backtick` line two |
+| 8 | `printf '%s\n' "中文 éèü ✓ 🎯"` | 56 | 中文 éèü ✓ 🎯 |
+| 9 | `git status --porcelain; echo exit=$?` | 55 | exit=128 [stderr] fatal: not a git repository (or any of the parent direct |
+| 10 | `git init -q ck51repo && cd ck51repo && git log --on...` | 83 | exit=128 [stderr] fatal: your current branch 'master' does not have any co |
+| 11 | `python3 -c "print(sum(range(10)))"` | 113 | 45 |
+| 12 | `node -e 'console.log(process.platform, 6*7)'` | 485 | linux 42 |
+| 13 | `seq 1 5000 \| grep -n 4777 \| head -3` | 68 | 4777:4777 |
+| 14 | `seq 1 200000 \| sed 's/^/row /'` | 131 | 42 row 152743 row 152744 row 152745 row 152746 row 152747 row 152748 row 1 |
+| 15 | `( sleep 2; echo BG_DONE > ck51-bg.txt ) & echo laun...` | 26 | launched [stderr] [1] 36163 |
+| 16 | `cat ck51-bg.txt 2>/dev/null; echo exit=$?` | 34 | exit=1 |
+| 17 | `sh -c "exit 7"` | 29 | [exit code: 7] |
+| 18 | `sudo -n true; echo exit=$?` | 97 | exit=1 [stderr] sudo: a password is required |
+| 19 | `bash -c 'sudo -n true; echo wrap=$?'` | 68 | wrap=1 [stderr] sudo: a password is required |
+| 20 | `man ls 2>/dev/null \| head -3; echo exit=$?` | 162 | LS(1) User Commands |
+| 21 | `top -bn1 2>/dev/null \| head -4; echo exit=$?` | 200 | top - 10:26:20 up 9:24, 0 users, load average: 0.07, 0.02, 0.00 Tasks: |
+| 22 | `vim ck51-note.txt` | 121703 | [24;1H"ck51-note.txt" [New][2;1H~ |
+| 23 | `echo "it's $(echo sub) $(echo '
+
+### Pass two — the same shape with pristine commands
+
+| # | pristine call | ms | reading |
+| --- | --- | --- | --- |
+| 1 | `top` | 687 | [stderr] top: failed tty get [exit code: 1] |
+| 2 | `vim ck51-note.txt` | 9829 | "ck51-note.txt" 2L, 18Bline one line two ~ |
+| 3 | `sudo true` | 130 | [sudo] password for ruler: sudo: no password was provided sudo: a passwor |
+| 4 | `less ck51-note.txt` | 73 | line one line two |
+| 5 | `bash -c 'sudo true'` | 118 | [sudo] password for ruler: sudo: no password was provided sudo: a passwor |
+| 6 | `git status` | 55 | [stderr] fatal: not a git repository (or any of the parent directories): . |
+
+### What this pass settled
+
+| row | verdict | whose behaviour |
+| --- | --- | --- |
+| 1-5, 27 | state is real in the product: `export` reaches the next call, `cd` reaches the next call, and the shell is still the same one after a 1.5 s timeout and a restart | ours, **[measured in a live session]** |
+| 6-8, 23-24 | the framing holds for heredocs, multi-line loops, nested quotes, `$( )` and non-ASCII — nothing was re-written or lost on the way in | ours, **[measured in a live session]** |
+| 9-10, 17 | failures arrive as the program's own words plus `[exit code: N]`, including `128` from git; the `[stderr]` section appears on the pipe path | ours, **[measured in a live session]** |
+| 13-14 | a pipeline behaves, and a 2.2 MB stream is not truncated: the body says `Omitted 470246 bytes. Full formatted result stored at: …` and points at a readable file | the host's retention layer, **[measured in a live session]** |
+| 15-16 | a command ending in `&` returns at once with `[1] 36163` on stderr, and the *next* call cannot see its output yet (`exit=1`) — the hazard the tool description warns about, reproduced in the model's own face | documented, **[measured in a live session]** |
+| 20-21, pass-two 4 | the pager class stays on the pipe and answers in tens of milliseconds (`man` 162 ms, `less` 73 ms); no pager was opened, no overstrike reached the model | ours, **[measured in a live session]** |
+| 18-19 | `sudo -n` answers with sudo's own verdict in 68-97 ms; with the `-n` form neither call needed a terminal, and pass two shows bare `sudo true` escalated in 130 ms with the password note attached | ours, **[measured in a live session]** |
+| 25 | `head: cannot open 'ck51-link.txt'` is **correct**: row 10 had `cd ck51repo`, so the link was made there and `ck51-note.txt` is not in that directory — the expectation in the checklist was written without the earlier `cd`, not a product defect | the fixture's, **[measured in a live session]** |
+| 22 | **a real defect, and the reason pass two exists.** The older rule read only the command's first word, so `printf 'x\n'; vim note.txt` was not escalated at all: it sat out the configured two-minute default (**121 703 ms**) and returned the screen's raw escapes (`\u001b[24;1H`, `~` rows) because the pipe path never folds them. Pass two's bare `vim` was escalated, cut at 8 s, and folded — the same program, 9 829 ms, with the note | ours, fixed the same round |
+
+**The fix, and what it cost to know.** The class is now the strongest one carried by *any* top-level
+segment (`cd /tmp && vim f` is an editor case; a quoted word is not a command position; the keyboard
+part outranks the credential part because it is the part that sets the deadline). Two live cells pin it:
+`printf 'x\n'; vim /etc/hostname` must report an 8000 ms deadline, and bare `top` must **not** be one —
+pass two measured `top: failed tty get`, exit 1, 687 ms, which also corrected a sentence the tool had
+been telling models: a live display on a pipe does not print a document, it refuses outright, so the
+description now says `top -bn1`. The whole checklist costs about 2 300 s of wall clock, and 121 s of
+that was the single defect it found.
+
+**Not covered by this pass, named rather than folded into the readings.** The provider is scripted, so
+this says nothing about whether a *real* model picks these commands or reads these notes well — it says
+what the tool returns when the calls arrive. Only one session existed in one window, so cross-instance
+(two Desktop windows) isolation is still unmeasured. The `wsl-standard` preset was absent for the first
+~10 s after the port listened (the variants are published by a fire-and-forget effect during profile
+boot) and the driver polls for it — a timing fact about boot, not about `bash`, and not verified against
+the desktop profile. Pass one's row 14 spill path and row 26 restart are the host's own retention and
+recovery shapes; they were read, not instrumented.
+)" && echo 'single...` | 29 | it's sub $ single'quoted |
+| 24 | `for i in 1 2 3; do echo "loop=$i" done` | 58 | loop=1 loop=2 loop=3 |
+| 25 | `ln -sfn ck51-note.txt ck51-link.txt && readlink ck5...` | 55 | ck51-note.txt [stderr] head: cannot open 'ck51-link.txt' for reading: No s |
+| 26 | `sleep 30` | 3145 | [timed out after 1500ms] [the shell was restarted to recover; for work tha |
+| 27 | `echo ALIVE_$(( 20 + 6 )) && pwd` | 73 | ALIVE_26 /tmp/ck51repo |
+
+### Pass two — the same shape with pristine commands
+
+<<TABLE2>>
+
+### What this pass settled
+
+| row | verdict | whose behaviour |
+| --- | --- | --- |
+| 1-5, 27 | state is real in the product: `export` reaches the next call, `cd` reaches the next call, and the shell is still the same one after a 1.5 s timeout and a restart | ours, **[measured in a live session]** |
+| 6-8, 23-24 | the framing holds for heredocs, multi-line loops, nested quotes, `$( )` and non-ASCII — nothing was re-written or lost on the way in | ours, **[measured in a live session]** |
+| 9-10, 17 | failures arrive as the program's own words plus `[exit code: N]`, including `128` from git; the `[stderr]` section appears on the pipe path | ours, **[measured in a live session]** |
+| 13-14 | a pipeline behaves, and a 2.2 MB stream is not truncated: the body says `Omitted 470246 bytes. Full formatted result stored at: …` and points at a readable file | the host's retention layer, **[measured in a live session]** |
+| 15-16 | a command ending in `&` returns at once with `[1] 36163` on stderr, and the *next* call cannot see its output yet (`exit=1`) — the hazard the tool description warns about, reproduced in the model's own face | documented, **[measured in a live session]** |
+| 20-21, pass-two 4 | the pager class stays on the pipe and answers in tens of milliseconds (`man` 162 ms, `less` 73 ms); no pager was opened, no overstrike reached the model | ours, **[measured in a live session]** |
+| 18-19 | `sudo -n` answers with sudo's own verdict in 68-97 ms; with the `-n` form neither call needed a terminal, and pass two shows bare `sudo true` escalated in 130 ms with the password note attached | ours, **[measured in a live session]** |
+| 25 | `head: cannot open 'ck51-link.txt'` is **correct**: row 10 had `cd ck51repo`, so the link was made there and `ck51-note.txt` is not in that directory — the expectation in the checklist was written without the earlier `cd`, not a product defect | the fixture's, **[measured in a live session]** |
+| 22 | **a real defect, and the reason pass two exists.** The older rule read only the command's first word, so `printf 'x\n'; vim note.txt` was not escalated at all: it sat out the configured two-minute default (**121 703 ms**) and returned the screen's raw escapes (`\u001b[24;1H`, `~` rows) because the pipe path never folds them. Pass two's bare `vim` was escalated, cut at 8 s, and folded — the same program, 9 829 ms, with the note | ours, fixed the same round |
+
+**The fix, and what it cost to know.** The class is now the strongest one carried by *any* top-level
+segment (`cd /tmp && vim f` is an editor case; a quoted word is not a command position; the keyboard
+part outranks the credential part because it is the part that sets the deadline). Two live cells pin it:
+`printf 'x\n'; vim /etc/hostname` must report an 8000 ms deadline, and bare `top` must **not** be one —
+pass two measured `top: failed tty get`, exit 1, 687 ms, which also corrected a sentence the tool had
+been telling models: a live display on a pipe does not print a document, it refuses outright, so the
+description now says `top -bn1`. The whole checklist costs about 2 300 s of wall clock, and 121 s of
+that was the single defect it found.
+
+**Not covered by this pass, named rather than folded into the readings.** The provider is scripted, so
+this says nothing about whether a *real* model picks these commands or reads these notes well — it says
+what the tool returns when the calls arrive. Only one session existed in one window, so cross-instance
+(two Desktop windows) isolation is still unmeasured. The `wsl-standard` preset was absent for the first
+~10 s after the port listened (the variants are published by a fire-and-forget effect during profile
+boot) and the driver polls for it — a timing fact about boot, not about `bash`, and not verified against
+the desktop profile. Pass one's row 14 spill path and row 26 restart are the host's own retention and
+recovery shapes; they were read, not instrumented.
+
+## The installed desktop's own turn, and the two things it said (2026-10-05, third round)
+
+The user restarted DSH Desktop at **11:26:20** (backend PID 13276, read from `Get-Process.StartTime`) and
+sent `printf x; vim note.txt` into his own WSL session at **11:52:40**. My install of the current build
+landed at **11:51:03** — after his restart — so that turn ran on the 00:43 bytes, and it read as a
+failure of the fix when it was a failure of ordering. Recorded here because the ordering is now a check,
+not an assumption: before asking anyone to restart, read the backend's start time and compare it with the
+installed `lib` mtime.
+
+The turn itself is worth more than the ordering mistake, because it is the first reading of **what a real
+model actually sends** (his provider, `sensenova / deepseek-v4-flash`, so real tokens):
+
+| field | reading from `session-b7b8f571…` |
+| --- | --- |
+| `agent-preset/selected` | `wsl-standard` — our variant, in his window |
+| the model's call | `{"command":"printf x; vim note.txt","description":"Print x then open note.txt in vim",`**`"timeoutMs":15000`**`}` |
+| the tool's body | `x` + `\u001b[24;1H"note.txt" [New]~ …` + `[stderr] Vim: Warning: Output is not to a terminal` |
+| what that proves | not escalated (a pty has no `[stderr]` section and vim would not warn), so the first-word rule was defeated by the model's own `printf` — the same shape pass one measured at 121 703 ms |
+| what the model did next | called `read /tmp/note.txt` → `not found`, then summarised in Chinese and completed the turn |
+
+**The design fact it exposed.** A model names its own deadline. Under the rule as written — the 8 s bound
+applies only when the call gave neither `tty` nor `timeoutMs` — that call would have been escalated by the
+new per-segment rule and still have received a generic sentence instead of the non-interactive form, which
+is the half of the requirement that says *provide the solution*. So the hint is now keyed to the **class**
+and the deadline stays the caller's: we do not silently shorten what we were told, but a keyboard-class
+timeout always says what to use instead. Two cells, 49 total now:
+
+- `vim /etc/hostname` with `timeoutMs: 4000` → deadline stays 4000, hint present. Measured `{"ms":5104,"deadline":4000,"hint":true}` on both planes.
+- `sleep 5` with `tty: true, timeoutMs: 1000` → the body may claim a restart only if the session reports one; the two sentences are produced from different facts and are asserted against each other. Measured `{"claimedRecovery":true,"actuallyRestarted":true}` — **an escalated timeout really does rebuild the session**, which is a cost of that tier worth knowing.
+
+**What this pass did not measure.** It is one turn in one window on the *old* bytes; the new bytes have
+not yet been driven through his desktop, only through the harness (49/49 both planes) and the scripted
+session. Cross-instance isolation, a distribution without `script`, and `Defaults requiretty` remain
+unmeasured.
+
+## The same prompt, his desktop, before and after (2026-10-05 12:14)
+
+He restarted the installed desktop at **12:12:54** (backend PID 9924, read from `Get-Process.StartTime`),
+which is after the 12:08:41 install — the ordering check this time, not an assumption. He then sent the
+identical line into the same WSL session (`session-b7b8f571…`, `wsl-standard`, his own
+`sensenova / deepseek-v4-flash`). Turn 22 is the old bytes, turn 23 the new ones, same arguments:
+
+| field | turn 22 — old bytes, 11:52 | turn 23 — new bytes, 12:14 |
+| --- | --- | --- |
+| the model's call | `{"command":"printf x; vim note.txt","timeoutMs":15000}` | identical, character for character |
+| elapsed | 16 777 ms | 16 889 ms |
+| `ESC[` sequences in the body | **26** | **0** |
+| `[stderr]` section | present — which is the pipe talking | absent — a pseudo-terminal has one stream |
+| `Vim: Warning: Output is not to a terminal` | in the body | gone: vim believed it had a terminal |
+| what the notes said | timeout + a generic restart sentence | timeout + **the non-interactive forms to use instead** + restart/replay + `[1 detached process from the previous shell was stopped]` |
+
+Turn 24, sent seconds later: `sudo true` with `timeoutMs: 30000` → **112 ms**, sudo's own three lines,
+`[exit code: 1]`, and the note that there is nobody to type a password. That is the credential class
+answering inside its budget in the real product, which is what the 10-04 clicks could not show.
+
+**What this did not buy.** The wall clock did not drop, and it was never going to: the model named
+15 000 ms and we now honour what we were told, so the 8 s bound is not applied to this call — the fix
+moved the *content* of the answer, not its length. If the wait itself is the thing to shorten, the
+honest options are a sentence in the tool description telling the model not to set a deadline for an
+editor (copy, not judgement), or overriding a named deadline (we have decided against that twice: it is
+the same shape as ignoring `run_in_background`). One residual: a single `\f` still survives the fold in
+turn 23's body — cosmetic, and no cell claims it is stripped.
+
+## The name lists are deleted: what the distribution actually reports about a waiting command (2026-10-05, fourth round)
+
+Every claim in the three sections above about *which* commands get a pseudo-terminal — the 43 words, the
+credential/keyboard/pager classes, the 8-second ceiling and its cap sentence — is **superseded** by this
+section. They were drafted into an unreleased version, so nothing published ever carried them; the
+measurements stay in the record because they are what justified each rule and each deletion.
+
+The reason for the change is not taste about maintenance. Two of this ticket's own defects came out of
+the lists (a scan that stopped at a hyphen, so `ssh-copy-id`/`ssh-keygen`/`redis-cli` were dead letters;
+a decision that read only the first word, costing **121 703 ms** in a real session), and the property
+they were approximating is directly observable: a command waiting for a keyboard can be *seen*, from
+outside the shell, while the call is in flight.
+
+### The premise, corrected
+
+`src/host/wsl-bash-session.ts` and `src/host/wsl-bash-protocol.ts` both said the session has *no*
+terminal, and that the repaint which broke the host's matcher was readline's `ESC[<n>X`. Neither is what
+the artefacts show:
+
+- `ps -o tty= -p $$` inside the session answers **`pts/1`** and `$-` is **`himBs`**, so the piped
+  interactive shell does have a controlling terminal and job control. What the pipes replace is the
+  terminal *as stdio*: the input side of that pts belongs to WSL, and nothing on this machine can type
+  into it. A program that reads `/dev/tty` therefore **waits** rather than failing.
+- The captured raw stream (`tailbytes.raw.txt`, 1 627 B) contains `ESC[K` x7, `ESC[2J`, cursor
+  positioning `ESC[<n>;nH`, `ESC[m`, `ESC[25l` and literal spaces — and **no `ESC[<n>X` at all**. So what
+  this protocol defends against is the measured shape (bytes between the digits and the newline: proved
+  against the host's own `commandOutput()` — `:0 SP SP` never settles, `:0 SP` never settles, `:0 CRLF`
+  settles), not a named erase recipe.
+
+Both wordings are corrected in the source, in the two READMEs and in the changelog pair.
+
+### What the readings look like (`D:\Temp\issue51-s0\v1c-report.txt`, `v1c-table.txt`)
+
+Sampled through a sibling `wsl.exe` as the same user the session runs as, against the production session,
+with the fields the shipped probe prints (`ps -o pid=,ppid=,pgid=,tpgid=,stat=`, `/proc/<pid>/wchan`,
+`/proc/<pid>/schedstat`, the `fd` table).
+
+| the command is | state | `wchan` | a terminal in its fds | CPU | classified as |
+| --- | --- | --- | --- | --- | --- |
+| `sh -c 'read x < /dev/tty'` | `S+`, `pgid == tpgid` | `wait_woken` | yes — reported as **`/dev/tty`**, not `pts/N` | flat | `terminal` |
+| `sudo true` asking for a password, user plane | `S+` | `0` (unreadable) | unreadable (`links=[]`) | flat | `opaque` |
+| the same, root plane | `S+` | `wait_woken` | yes, `/dev/tty` present; `/proc/<pid>/syscall` first field `0` = `read` | flat | would be `terminal` |
+| `sleep 6` | `S+`, `pgid == tpgid` | `hrtimer_nanosleep` | no | flat | nothing |
+| `getent` / `curl` on a dead host | `S` | `poll_schedule_timeout` | no | flat | nothing |
+| `dd if=/dev/zero bs=1M count=800` piped to `sha256sum` | `Rl+` | empty, i.e. running | writing to a pipe | rising | nothing |
+| `vim` on a pty this tool created | `S+` | `poll_schedule_timeout` | yes | flat | `own-terminal`, and only because the pty is ours |
+
+`sudo` clears its dumpable flag, which is why its `/proc` entries are invisible even to its own owner;
+that is the whole difference between the confirmed and the unconfirmable reading, and it is why the note
+says which of the two it was rather than claiming a terminal read it did not see. Reaching the root plane
+(`wsl -u root`, passwordless on this machine, 827–1207 ms per pass against 200–280 ms on the user plane)
+would turn `opaque` into `terminal` and let `sudo` be caught in 1.2 s instead of 8 s. It is **not** used:
+a diagnostic that needs privilege in order to be quick is a capability the plugin would be asking for to
+save seven seconds, and the distribution's own answer arrives anyway.
+
+### The cadence, priced and then bounded by the price
+
+One probe pass costs **200–280 ms** with the small script and 400–600 ms with the fd and syscall columns
+added; the first cold `wsl.exe` of a session costs 586–1251 ms. Hence the shipped numbers: first look
+after **1.2 s** of silence, then at most every **500 ms**, and the unconfirmable window at **8 s** — the
+ceiling this tool had already committed to for a keyboard wait, reused so the plugin does not quietly
+invent a second one. Nothing about the wait can be decided from `state` alone: `sleep 6` and `sudo` on its
+prompt are both `S+` in the terminal's foreground job, which is exactly the pair the rule has to separate.
+
+### Does stopping it from outside keep the protocol in step? Yes, and better than the deadline
+
+With the frame in flight, `SIGCONT -> SIGTERM -> (0.3 s) -> SIGKILL` to the pids the probe just named:
+
+```
+exit=1  timedOut=false  restarted=undefined  after 3669ms   (the call had a 30 s budget)
+next call:  echo PWD=$PWD; echo ALIVE2=$((6*7))  ->  /home/ruler   ALIVE2=42
+```
+
+The frame still writes its own completion record, so **no rebuild and no replay** — the state the wedged
+command left behind survives, which is strictly more than the deadline path preserves (it rebuilds the
+shell and replays the journal). That is why the reaction is a stop-and-retry rather than a
+report-and-continue.
+
+### End to end, through the real tool (`v5-run.txt`)
+
+| call | result | reading |
+| --- | --- | --- |
+| `sh -c 'read x < /dev/tty; echo GOT=$?'` | **2 342 ms, exit 0**, body `GOT=1`, note says stopped at 1 200 ms and re-run | `terminal` then retry |
+| `bash -c 'read x < /dev/tty; echo GOT=$?'` | 2 205 ms, exit 0, `GOT=1` | caught without reading a single word |
+| `printf 'x\n'` then the same read | 2 299 ms, body `x GOT=1` | bytes arriving first do not blind the probe |
+| same command with `{timeoutMs: 60000}` | **2 233 ms** | a longer deadline does not buy the wait back |
+| same command with `tty: false` | 2 344 ms, **exit 143**, note names the `/proc` field and the doors, **no second attempt** | the veto holds |
+| `sleep 4; echo SLEPT_RIGHT` | 4 195 ms, exit 0, no note | quiet is not stuck |
+| `sudo true` as `ruler`, no `tty` argument at all | **9 529 ms, exit 1**, sudo's own three lines plus the password note | `opaque` at 8 s then retry |
+| `vim -u NONE -i NONE -n note.txt` with `tty: true` | 9 594 ms, **exit 137**, `own-terminal` note | bounded by evidence, not by a name |
+| `tar -cf /dev/null /usr/bin` | 52 ms | untouched |
+| afterwards: `echo ALIVE_$((6*7))` | 27 ms, `ALIVE_42` | the same shell, still alive |
+
+The gate carries all of these as cells (`bash-session-real`, 51 -> **56 checks**), and each reactive cell
+first reads whether *this* distribution has the premise at all (`ps -o tty= -p $$`) and prints which
+branch it took — on a distro where `/dev/tty` cannot be opened, `read x < /dev/tty` fails at once and the
+cell must not claim a wait was caught. Writing this machine's premise as a universal rule is the mistake
+this file has recorded twice already.
+
+### Three device bugs found on the way, each of which would have produced a false green
+
+1. **The probe script did not parse.** Joining statement fragments with `'; '` produced
+   `while … ]; do;`, which bash answers with `syntax error near unexpected token ';'`, exit 2 and **empty
+   stdout**. Inside the session the failure was invisible: no rows looks exactly like "no process is
+   waiting", so the whole layer was inert while every deadline cell still passed. Rewritten as one
+   explicit line; the unit test now asserts that `do;`, `then;` and `else;` cannot appear, and the pass
+   prints a completion sentinel (`DSH_PROBE_DONE`) which the session requires before trusting an empty
+   result.
+2. **Counting only `pts/` links missed `/dev/tty`.** `ls -l /proc/<pid>/fd` reports the redirect as
+   `-> /dev/tty`, not as the pts it resolves to, so the confirmed rule could not fire for the one command
+   built to test it. Now `grep -c -e pts/ -e /dev/tty`, and the test pins the pattern.
+3. **The measurement device anchored the session shell once.** A cell that reached its deadline rebuilt
+   the shell, after which the driver sampled a dead pid and reported "no processes" — which reads like a
+   product finding. Re-anchoring per cell changed `sudo` from "no rows" to "`S+`, opaque, stopped at 8 s".
+   A stale anchor is also why the compound editor cell first looked untouched.
+
+And the honesty item that stays open: `ForegroundOutput` has no `restarted` field (the host's arm does not
+either), so a driver can only see a restart through its note — the cell that reads `value.restarted` gets
+`undefined` even when the body says the shell was rebuilt.
+
+### Round five: the eight-second window is gone, and why eight was the wrong price
+
+The 8 s window was the price of "we cannot see why this privileged process is silent". The price was
+mispriced, because the premise was wrong: the process hides its `/proc` entries from *its own user*, not
+from the distribution root. One more pass of the same probe, run as `wsl ... -u root`, reads `wchan`, the
+fd table and the syscall of exactly those processes — measured in `v6-report.txt`: a root-owned child of
+`sudo` shows `S ... w=hrtimer_nanosleep tty=0` to that plane, so "asleep on a timer" and "asleep reading
+the terminal" are separable there, which is the discrimination the user plane cannot make for a setuid
+program.
+
+| reading | before | now | why it can be shorter |
+| --- | --- | --- | --- |
+| a terminal read seen directly | 1.2 s | **600 ms** | nothing else a `wait_woken` with a terminal among the fds can mean |
+| a privileged wait (sudo's prompt) | 8 s | **1.5 s, and the witness usually answers inside it** | root reads the wait, so this is a reading rather than a silence to sit out |
+| a program polling a pty this tool made | 8 s | **2.5 s** | the one reading where patience buys precision: `ssh` polls its socket and the terminal together |
+
+| call, driven through the tool (`v5-run.txt`) | before | now |
+| --- | --- | --- |
+| `sh -c 'read x < /dev/tty'` | 2 342 ms | **1 760 ms**, stopped at 628 ms |
+| `sudo true` as `ruler` | 9 529 ms | **2 412 ms**, stopped at 601 ms and confirmed through the root plane |
+| `vim` with `tty: true` | 9 594 ms | **4 106 ms**, stopped at 2 913 ms |
+| the veto case (`tty: false`) | 2 344 ms | **1 587 ms** |
+| `sleep 3` with `tty: true` (a legitimate silent pty program) | 3 101 ms, untouched | 3 104 ms, untouched |
+| `tar -cf /dev/null /usr/bin` | 52 ms | 46 ms |
+
+The cadence was re-priced against the probe instead of guessed: first look at **600 ms**, every **400 ms**
+for the first six looks, then every **2 s** — a pass costs 200-280 ms, so anything faster only queues
+probes behind each other. A call that is working still pays **zero**: one byte arriving resets the timer.
+
+**The shorter window immediately produced a false stop, which is why it was worth measuring.** With the
+own-terminal window at 1.5 s, a legitimate `sleep 3` under `tty: true` was stopped at 1 549 ms — the
+polling process was `script`, the wrapper *this tool* puts around a command for its own pty, not the
+command. The fix skips that one process by name for an own-terminal reading (`comm=script`): skipping our
+own wrapper, not guessing the user's command. The unit test pins the rule, and the cell that ran red now
+reports `3 104 ms, exit 0, notes []`.
+
+**What the witness costs, and what it asks for.** It is a diagnostic process run as root inside the
+user's distribution: one pass per call, only when a privileged wait is suspected, reading `/proc` and
+nothing else; and one failed attempt is remembered for the session, so a distribution without a usable
+root account pays for that discovery once and afterwards falls back to the unconfirmable reading and its
+1.5 s window. The note says which of the two happened — a certainty this tool cannot support is exactly
+what the note channel exists to prevent.
+
+### Round six: the answer stops waiting for the state record (2026-10-06)
+
+Per-call cost against the two baselines, same command, five samples each, warm on all sides
+(`D:Tempissue51-s0speed-report.txt`, `terminal-report.txt`):
+
+| shape | median | what the number is made of |
+| --- | --- | --- |
+| one `wsl.exe … bash -c` per command | **222-236 ms** | the Windows process plus the WSL session, not the command |
+| this tier before this round | **33 ms** | 20 ms poll interval + a 5 564-byte / ~25 ms state record awaited in every call |
+| this tier now | **8 ms** | one frame round trip, woken on arrival, with the state record collected between calls |
+| a person typing into an already-open terminal | **16 ms** | bash fork+exec plus the pty round trip |
+
+Three changes, each measured before it was written:
+
+1. **The state record leaves the critical path.** Every frame ends with an exit-code record and then a
+   `#dsh-section` report of `export -p`, `PWD`, the pid, `alias -p`, `set +o`, `shopt -p` and the
+   function count — **5 564 bytes and 25 ms of the shell's own work**, measured by running the same
+   `{ … } | base64 -w0` under `date +%s%N`. Nothing a call answers needs it: it exists so a *future*
+   rebuild can replay the shell. `readCompletion` now settles a call on the exit-code record alone and
+   the state is drained between calls — and, when it matters, in `rebuild()` before the replay is built.
+2. **The reader wakes on output instead of on a clock.** A fixed 20 ms sleep sat between every look at
+   the buffer; `waitForOutput` resolves the moment stdout or stderr moves, with the timer only as the
+   safety net for a deadline, a probe verdict or a death.
+3. **The watchdog no longer blocks the reader.** A probe costs 200-280 ms, and awaiting it inside the
+   read loop delayed every silent command by that much (measured: `sleep 3` answered 0.27 s late). It is
+   fired and its verdict applied when it lands, guarded by `watch.settled`.
+
+**Three defects surfaced, all by the gate, all of them invisible to the offline suite.** Each is worth
+recording because each looked like something else:
+
+- **stderr arrived one call late.** stdout carries the exit-code record and stderr carries half the
+  answer, on two pipes with no ordering between them; settling on the record beat the command's own
+  `echo oops >&2`, so the body read `(no output)` and the bytes landed in the *next* call's window. A
+  timer-based grace was written first and failed too (it cannot tell "no stderr yet" from "stderr long
+  over"). The fix is an event: the frame writes one NUL byte on stderr after the command and after the
+  record, so "everything the command wrote on fd 2 has been written" is ordered by the writing process
+  itself. The byte is dropped before the model could see it.
+- **The first version of the marker did not run at all**: it was written after the frame's trailing
+  `# __DSH_WSL_BASH_REC` comment, where bash treats it as comment text — found by tracing the frame and
+  reading `stderr-end seen=false` on every call (the 100 ms budget was being spent every time).
+- **The pid and the journal arrived one call late.** Nothing was wrong with the drain itself, but the
+  watchdog needs the shell pid from the state record to look at anything, and it now lived in the
+  *next* call's future. Measured through a raw session (`{shellPid:0, pending:true, out:0}` after the
+  first call) and fixed where a wait is invisible: `start()` settles the bootstrap's tail before any
+  user call, and `rebuild()` settles the replay's tail before the new shell takes work.
+
+A fourth hazard was written and never shipped: the first cut consumed the previous window only when the
+state record arrived, and a 200 000-line spill trims the buffer from the front — after a trim, the
+record's offsets no longer meant anything, the drain never landed, and the next call's stdout window
+began with the previous command's output (`stdout="25740
+125741
+…"` in a repro). Consuming the
+window at settle and keeping the pending record at the head of the buffer removes the whole class: past
+that point, offsets are only ever taken against a buffer that starts where the last consumption ended.
+
+The gate carries all of it: 55 cells on two planes as two users, after this round as before it.
+
+### Round seven: a live model found the case the cells could not (2026-10-06)
+
+The run: this build installed into an isolated `DSH_HOME` (own port, its own web profile, `remove` then
+`add`, with the installed chunk asserted to carry `wait_woken`), one session in the WSL workspace, one
+prompt asking for four real things — report the environment and compute something; run a command that
+waits for the keyboard; run `sudo`; run a quiet command — with the model free to choose every command.
+Provider: his own free token-plan credential, read from `~/.dsh/.credentials.yaml` in-process and never
+written to disk nor printed.
+
+| call the model chose (first run) | wall clock | what came back |
+| --- | --- | --- |
+| `uname -r; grep PRETTY_NAME /etc/os-release; whoami; pwd; echo "13*7 = $((13*7))"` | 593 ms | real distribution data and 91 |
+| `read -r line < /dev/tty; echo "line=[$line]"` | **31 282 ms — timed out, shell rebuilt** | nothing, and no note |
+| `sudo id` | 2 125 ms | sudo's own three lines, plus the root-plane re-run note |
+| `sleep 3; echo "exit=$?"` | 3 021 ms | `exit=0` |
+
+The second call is the finding. Every cell here wrote `sh -c 'read …'`, which blocks a *child*; the walk
+looked only at descendants; a builtin has none. Measured while it happens, the shell's own row is
+`Ss+ pgid==tpgid wchan=wait_woken fd0=/dev/tty` with CPU flat — the same signature one level up — so the
+shell is now in the walk, marked (between commands it waits on a pipe, which must not read as a wait).
+
+The first attempt at freeing it was a guess, and it was measured wrong: `kill -INT` left the call running
+to its deadline, because bash catches the signal and the read syscall restarts. What ships is the reaction
+that works — the shell is stopped like any other wedged process (`CONT`, `TERM`, `KILL`), the session
+rebuilds from its journal, and the tool re-runs the command on a terminal where the read meets
+end-of-file. New cell, 56 total: `a builtin that reads the terminal is ended and re-run, not left to the
+deadline`.
+
+Four more defects were announced by cells while that landed: the stop set named every row in the sample
+(the shell is now always in it, so a child reading its terminal dragged the shell along); the privileged
+path took its stop set from the user-plane rows, where `sudo` shows `wchan=0 tty=-1` — the witness
+confirmed the wait and the stop set was empty, so the call ran to its 25 s deadline; a watchdog-stopped
+call was reported as `aborted`, the caller-cancel shape, which made the live gate abort its own run; and
+one cell's regex was written `/LINE=[]/` — an empty character class that can never match — instead of a
+string test, which is a reminder that a red cell has to be read for whose defect it is before anything is
+changed.
+
+Second run of the same prompt, after the fix: ① 513 ms; ② **3 104 ms**, body `read-exit=1 x=''` plus
+`[the first attempt was ended by restarting the shell … after 606ms …]`; ③ `sudo -n id` 51 ms with
+`sudo: a password is required`; ④ 3 040 ms — and the model's closing message quoted the note and
+explained the difference between the two cases. Usage: two billed requests, 1 490 + 8 379 and
+10 084 + 3 301 tokens (the file also records a first attempt whose 8 192-token cap was spent entirely on
+reasoning and which produced no tool call — the failure his provider config documents).
+
+### Round eight: the same eight-step task on three transports (2026-10-06)
+
+"Normal dsh on WSL" is not a hypothetical: it is the host's own PTY tier — `dsh-terminal-bash` plus
+`dsh-tool-bash-persistent`, pointed at this plugin's relay — which is what existed before this plugin
+wrote its own shell, and the tier issue #51 was filed against. So the comparison is measurable:
+one task, eight steps (make a directory, write a file, edit it, generate 200 lines, count them, tar
+them, run a language runtime, clean up), each step one call, on three transports.
+
+| arm | what it is | total | worst step | steps that never settled |
+| --- | --- | --- | --- | --- |
+| A | this plugin's `bash` (pipe session) | **390 ms** | 232 ms | **0/8** |
+| B | the host's PTY tier — "dsh using WSL normally" | **86 785 ms** | 23 787 ms | **3/8** |
+| C | a real terminal, typed into (`script -qec "bash -i"`) | **282 ms** | 120 ms | 0/8 |
+
+Per step, arm B: `mkdir … && cd … && pwd` 23 787 ms **never settled**; `printf … > f.txt; wc -l` 20 265 ms
+**never settled**; `sed -i …` 4 141 ms; `for i in $(seq 1 200) …` 23 709 ms **never settled`; `grep -c .` 4 115 ms;
+`tar` 3 565 ms; `node -e` 3 610 ms; clean-up 3 593 ms. The three that never settled were bounded by this
+driver at 20 s per step; in the product they run to the host tool's own `timeoutMs` (300 s by default),
+which is the 303.8 s measured in the reporter's Desktop session.
+
+Arm A's steps: 25-51 ms each, with `node -e` the slowest at 232 ms (a runtime starting, not the
+transport). Arm C: 13-38 ms each, the 200-line loop the slowest at 120 ms.
+
+Three things this does and does not say. (1) On a task like this one, arm A and a person's own terminal
+cost the same order of magnitude — 8-50 ms per step against 13-38 ms — because neither waits for a
+terminal to be scraped. (2) Arm B is not slow, it is *unreliable*: half its steps took the host's
+idle-silence path (3.5-4.1 s) and the other three never completed at all inside 20 s. (3) Arm C's
+typing time is the driver's, not a person's, and it ran its steps from `/mnt/d/…` while the others ran
+in `~` — same commands, a different mount.
+
+Report files: `D:\Temp\issue51-s0\three-arms-report.txt`, `speed-report.txt`, `terminal-report.txt`.
+
+### Round nine: the keyboard door, driven through the tool the world mounts (2026-10-06)
+
+The last gap in the ticket's contract was the class a pipe cannot answer: a program that asks a
+question. Round eight priced the answer that existed — diagnose, stop, re-run on a one-shot
+pseudo-terminal, read the complaint — and it ends with a person taking over. `wsl_terminal` is the
+door that makes the answer *answerable*: the host's own PTY registry and `dsh-terminal-bash` backend
+pointed at this plugin's relay, driven through the model-facing tool, with the agent's hands on the
+keyboard.
+
+Driven this time through **`ctx.tools.get('wsl_terminal')`** — the registry channel the model uses,
+not a hand-call into the service — with a real `wsl.exe … bash -i` under the host's ConPTY, on a real
+distribution, both build planes, as `root` and as `ruler` (66/66 cells each). Readings from the
+`src`/`root` run:
+
+- `open` **477–490 ms** (warm distribution), and the shell counted as a process: `bash -i` 0 → 1 in
+  the distribution, which is the reading that separates "a real shell started" from "a welcome
+  message was printed".
+- **The keystroke cell**: `sh -c 'read x < /dev/tty; echo GOT=$x'` sent (1 235 ms — the send settles
+  on the quiet window while the program waits), then `hello-from-the-door` sent (1 777 ms) — the
+  screen answered `GOT=hello-from-the-door`. This is the thing the pipe cannot do and the one-shot
+  pseudo-terminal cannot do either: nobody can type into the second one.
+- `submit: false` typed `echo TYPED_NOT_RUN` without running it, and the next send's Enter ran it.
+- **The user cell**: the workspace store named `root` for the door's own cwd while the distribution
+  default on this machine is `ruler`; `whoami` in the door answered `root`. This is the relay reading
+  the workspace store back, because the host builds a PTY child's environment itself and its
+  `scrubbedParentEnv()` drops every `DSH_*` variable — measured, so the environment route is not
+  available at all. On the `ruler` legs the two users coincide and the cell says so instead of
+  claiming a discrimination it did not have.
+- `SIGINT` was delivered to the foreground process group (9 ms) and ended a `sleep 30`; the shell
+  survived it and answered the next command.
+- `close` took the session and its shell down: `list` answered "no terminal is open" and `bash -i`
+  went 1 → 0 — counted in the distribution, not read off the tool's own sentence.
+
+**The cost shape, measured rather than promised.** Eight sends: `1762, 1277, 1764, 1281, 1762, 1733,
+1218, 1729` ms — every one settled on the backend's quiet window, none on its 30 s deadline. The
+host's quiet window is lowered to 1200 ms from its 3000 ms default (source note in
+`src/host/variants.ts`), which is what turns the earlier 3.0–3.6 s reading into this one. Worth
+recording honestly: **the host's fast prompt-recognition path did not fire in this run at all** — the
+2026-10-05 V4 measurement saw it fire on some sends (75–136 ms) and not others (3.0–3.6 s), both on
+this same machine and host build. That path compares the prompt tail six characters after the OSC
+marker, a sibling of the comparison issue #51 is about, and it lives in the host's code: the gate
+therefore asserts the computed answer and *reports* which path settled each send rather than requiring
+the fast one, and the door's note names the difference to the model.
+
+What this round does and does not say. It does: the door starts a real shell, a real program blocked
+on `/dev/tty` receives typed bytes, the shell is the workspace's user, signals reach the foreground
+process, and closing leaves nothing behind — on both planes and both users. It does not: that the
+host's fast path is reliable (it is not, see above); that the door was driven inside a live Desktop
+session (the chain driven here is the same host packages and the same relay the world mounts, and the
+Desktop end-to-end from round seven covered the pipe tier, not this tool); or that the shape holds on
+the other declared releases (the multi-version matrix has not been re-run on this tip).
+
+### The stdin channel (2026-10-06, same day, four cells)
+
+The protocol owns the session shell's stdin, so a command's stdin was `/dev/null` by construction.
+That is right for most calls and fatal for the class that reads a program's input from a pipe, so the
+call's `stdin` text now travels inside the frame and is decoded into a temporary file the command's
+stdin is redirected from (removed after the exit status is read). The cells that matter are not "the
+bytes arrived" but the two ways this could be worse than not having it: `cat` fed two lines printed
+both **and the call still settled** (the command must not eat the record that ends the call — the
+reason the channel exists at all is that the shell's stdin is the protocol), and the *next* call
+answered normally (the session's own stdin was not consumed). On the escalated path the same input
+arrives too — `read x; echo GOT=$x` under `script` answered `GOT=typed-by-stdin` in 306 ms, because
+`script` forwards its stdin to the pty it creates. One byte over the 32 KiB ceiling refuses by name
+(`wsl-bash: stdin is 32769 bytes, over the 32768-byte ceiling …`) with nothing run; the ceiling is
+half the measured 64 kB frame point (a 64 kB command answers in ~3.8 s, 256 kB in ~59 s), and a
+program fed half its input fails in ways that look like the program's fault, which is why the answer
+is a refusal and not a truncation. The **background** arm was measured by actually running the job the
+producer recorded (the registry double never calls `run()`): `cat` there printed
+`FED_TO_BACKGROUND\nRC=0` and the job settled `completed`, so the one-shot executor — the same code the
+host's own background arm uses — carries the input too. First version of that cell asserted on `''`,
+because the producer's `readOutput()` is a rendered string (the registry's contract) and the cell read
+it as the shell handle's `{delta}`. Recorded because the first run of these cells showed
+`shell-init: error retrieving current directory` inside the escalated cell: the driver's earlier
+relative-`workdir` cell leaves the session inside a directory a later cell deletes, and the *first new
+bash* started there says so. The section now starts with a `cd` home and the line is gone — the
+artifact was the driver's, not the channel's, and it was measured rather than assumed.
+
+Found while adding the cells, and fixed in the same pass: `tests/host-profile-isolation.mjs` was red
+on **Windows only**. Its two "a healthy frame says nothing / a failing source is reported once" cells
+count `console.warn` output as failures, and the plugin legitimately warns once at boot on win32 when
+its session probe has no `subprocess` service to probe with (`session probe skipped … mounted
+unverified`) — a line the Linux CI never sees, because the whole win32 probe branch is skipped there.
+The tree at `60354d5` (before this round) reproduces both reds; the cells now separate diagnostics
+from failures, with the platform note attached to the constant.
+
+### Round ten: his Desktop, a real model, an eleven-step development workflow (2026-10-06)
+
+The strongest device this repository has is the one it cannot run itself: the user's own DSH Desktop,
+with the plugin installed from this branch and a real model choosing the commands. He ran one prompt
+— an eleven-step workflow (environment, `git init`/branch/two commits, heredoc scaffolding, 200
+generated files with a `find | xargs sed -i` pass, a tar/sha256 bundle, word-frequency pipelines, a
+15 s progress loop, a background job read twice and killed, `stdin`, the interactive cases, and four
+boundary commands) — and the readings below come from the session transcript
+(`~/.dsh/sessions/--wsl.localhost-Ubuntu-home-ruler--/session-76fd6b4b…/session.v4.jsonl.zstd`), not
+from his summary.
+
+Shape of the run: **29 tool calls, 481 s wall clock of which ≈45 s is tool time** — the rest is the
+provider's own retries (nine `sensenova` retries on `EMPTY_RESPONSE`/`RATE_LIMIT`) and the model's
+reasoning. Nine of the eleven steps passed on the first attempt; neither of the two that did not was a
+plugin defect (below).
+
+| step | what it did | reading |
+| --- | --- | --- |
+| 1 | environment + workspace dir | **762 ms** (first call, session boot included); `Linux 6.18.40.1-microsoft-standard-WSL2`, `ruler`, node v22.22.0, Python 3.10.12 |
+| 2 | `git init`, two commits, branch, `log --graph`, `diff --stat` | **85 ms** |
+| 3 | two scripts written by heredoc, `chmod +x` | **37 ms** |
+| 4 | 200 `.log` files × 20 lines (CJK, quotes, `$`, backslash), `find \| xargs sed -i`, `grep -rl` = 200 files | **604 ms** |
+| 5 | `tar czf` + `sha256sum` + `git status` shows no `dist/` | **42 ms** |
+| 6 | word frequency, `wc -l`, a Node script and a Python script | **162 ms** |
+| 7 | 30 × 0.5 s progress loop | **15 122 ms**, `exit=0`, not interrupted — the "merely slow" case stays untouched |
+| 8 | background job appended to a file; two `job_output` reads; `job_kill` | start **55 ms**; both reads `(no new output) [status: running]` (the loop wrote to a file, so there was nothing on stdout to give); 35 lines before the kill, `tail -3` named them |
+| 9 | `stdin` → `python3 -c '…sys.stdin.read()…'` | **85 ms**; 45 characters in, the same characters echoed back — the first real-model use of the channel |
+| 10a | `read -r line < /dev/tty` | **3 084 ms**: stopped at **603 ms**, **the shell restarted** (the blocked process was the shell itself), re-run on a pty → `got:` empty; both facts in the note the model read |
+| 10b | `sudo true` | **2 153 ms**: stopped at **623 ms** through the **root plane** — the note says why (`read through the distribution's root rights, because this process hides its own /proc entries from its user`) — re-run on a pty → sudo's own three lines, `exit=1`. **First real-Desktop confirmation of the root witness** |
+| 10c | `wsl_terminal`: `open` → `python3 -i` → two expressions → `SIGINT` → `read` → `close` | **528 / 1 328 / 1 276 / 1 236 / 14 / 8 / 170 ms**. `1+1` → `2`, `print("ok" * 3)` → `okokok`, `SIGINT` → `KeyboardInterrupt` back at `>>>`, the screen re-read from the retained scrollback, close answered `[terminal pty-1 closed]`. **The door, on the real Desktop, in a real model's hands** |
+| 11 | space+CJK filename, symlink, `echo hi!`, `seq 1 100000` | one failure, and it was the model's own command: `ln -s dist/target.txt dist/link.txt` makes a link whose target resolves to `dist/dist/target.txt`, so `readlink -f` exited 1 and the `&&` chain stopped — **correct shell semantics**, found and fixed by the model itself in the next two calls; `echo hi!` printed `hi!` (history expansion off), and the bare `seq` came back truncated with the spill path plus a 100 000-line copy it had written itself |
+
+What it says, and what it does not. It says: the whole development-flow class works — pipelines, bulk
+file generation and in-place editing, archives, hashes, git, interpreters, a slow command that is left
+alone, a background job with the host's own `job_*` tools, `stdin`, the two keyboard-diagnosis paths
+(including the root-plane one), the door end to end, and the boundary cases. It does not say: that a
+password was ever typed (the machine's `sudo` wants one and nothing here holds it), that the door was
+driven from outside this one workflow, or that the eleven-release matrix holds on this tip.
+
+Two observations recorded rather than fixed: the door's screen carries the five `bash: export: … not a
+valid identifier` lines his own rc file prints on an interactive start (reproduced under a plain
+`wsl.exe -e bash -i` earlier the same day — his distro's PATH gains Windows entries with spaces), and
+the door's prompt is the host's controlled `dsh>` rather than his own `PS1`, which is what makes a
+send's prompt recognition possible at all. The model noticed both and worked around them; a person
+sees the same lines in any WSL terminal on this machine.
+
+Residue after the run, read from the distribution and from `tasklist`: `bash -i` **0**, `wsl-relay`
+**0**, `node.exe` **0** — the door's shell and the relay were both gone, and the only shell left is
+the session's own `bash --norc -i`, which is the session still being open.
+
+## The outside run's three findings, measured here before any of them was believed or fixed (2026-10-06, eleventh round)
+
+An adversarial re-run of this branch arrived as a file (67 independent cells, its author's own gate at
+68/71, the eleven-release matrix at 17/20). It claimed three defects. None of them reproduced on this
+machine as described, and one of them could not: this distribution is Ubuntu 22.04, which ships no
+`/etc/profile.d/80-systemd-osc-context.sh`. So each claim was measured here before a line was written,
+and the first was reproduced by **simulating the profile that takes the contract away**, in a scratch
+`HOME` (`/tmp/dsh-relay-guard-<pid>`, removed at the end of the same script).
+
+**Finding 1 — the readiness contract depended on the distribution's startup files leaving it alone.**
+Four arms, each running the relay's own command shape and asking the inner interactive shell what it
+actually inherited:
+
+| arm | command | `PROMPT_COMMAND` exported into the inner shell | `133;D;` on the wire | prompt |
+|---|---|---|---|---|
+| 1 | old, hostile profile (the 26.04 shape) | `0` | no | the distribution's own |
+| 2 | old, benign profile (what this machine is) | `1` | yes | `dsh> ` |
+| 3 | **new, hostile profile** | **`1`** | **yes** | **`dsh> `** |
+| 4 | new, no contract bridged at all | `0` | no | its own — the guard is inert |
+
+The mechanism, measured on this machine directly: `PROMPT_COMMAND=x; PROMPT_COMMAND+=(y)` then export
+answers `0` — bash does not export arrays — while `unset` first answers `1`. A plain re-assignment
+without the `unset` also answers `0`, because assigning to an array writes element `[0]` and keeps the
+array attribute. That is why the relay now bridges the value a second time under
+`__DSH_READINESS_PROMPT_COMMAND` (a name no startup file has a reason to touch) and re-asserts it
+between the login pass and `exec`. The consequence the report described is real and was confirmed by
+reading: a session whose contract never arrives still gets the pipe-driven `bash` (which needs no
+prompt at all), while `wsl_terminal` pays its quiet window on every keystroke.
+
+**Finding 2 — the function snapshot's 64 KiB cap was applied to the whole dump.** The report's
+distribution has 86,954 bytes of startup functions, so every function in the shell — the one the model
+had just defined included — was thrown away. Costs measured here first, in a shell that has sourced the
+same rc files the session sources:
+
+| what | reading |
+|---|---|
+| startup set on this machine | 91 names, 61,881 bytes (under the cap by 3,655) |
+| the `sort`/`comm` set difference against a recorded baseline | 7 ms |
+| a walk of all 91 bodies one at a time | 150 ms |
+| snapshot emitted when nothing of the user's is defined | 0 bytes |
+| snapshot emitted after one user function | 68 bytes |
+| snapshot emitted with 120 kB of user functions present | 64,039 bytes, the rest named |
+
+The snapshot now carries only the functions the distribution's own files did not define (a rebuilt
+shell re-sources those, so replaying them proved nothing), budgets them one at a time, and names what
+does not fit. The 150 ms walk is paid only on a frame whose function count moved; an ordinary call still
+pays the comparison alone, which is why the loop lives in a helper the bootstrap defines rather than in
+the frame that goes out on every call.
+
+**The fix itself introduced a defect, and the live matrix caught it.** The first version read function
+names by cutting the prefix off `declare -F`. With `set -o allexport` in effect — which one of the
+existing cells turns on, in the same call that defines the function — bash prints `declare -fx name`, so
+every name came out as `declare -fx name`, every function looked new, the lookup found no such name, and
+the snapshot came back empty. Run through the frame shape directly, that reads as:
+
+```
+probe again: RCFLINES=92 NOW=96 NEW=declare -fx dshafter declare -fx dshrealfn2 declare -fx dshrealfnC dshrealfn
+```
+
+Names now come from `compgen -A function`, both in the baseline and in the snapshot, so a flag change
+cannot make the two sides disagree. Same three cells after the switch: the defining call's note reports
+`dshhugefn(70025)` by name and `dshsmallfn` comes back; `alias, function, shopt and set options survive
+a restart` carries `FN_OK_9` again; and a new cell — the builtin that reads the terminal, which rebuilds
+the shell inside the starve handling — now puts `not restored: functions dshhugefn2(70026)` in the body
+of the call that asked for the terminal, instead of losing it with the first attempt.
+
+**Finding 3 — a rebuild that had something to report was not believed by the cell that checks it.** The
+note renders as `was restarted and its directory …` when nothing was left out and `was restarted; not
+restored: …` when something was, and the check matched only the first form, so on a reporting machine
+the claim and the fact were both true and the cell still read them as disagreeing. Both forms count
+now, and the guard on a short run moved off a hand-kept number in the same round: the driver counts its
+own `check(` sites in its source and names each one that never reported, so a truncated arm reads as 76
+sites with 28 named rather than as a total nobody can explain.
+
+**What this round does not claim.** The four-arm table simulates the offending profile rather than
+running on a distribution that ships it, so `conpty-relay` on a 26.04-class machine is still unproven
+here; the eleven-release matrix has not been re-run on this tip; an *override* of a function the
+distribution itself defines is still not restored (the count does not move, so no snapshot is asked —
+the same behaviour as before this change, now written down); and the door on this machine settles on the
+quiet window even though the controlled prompt is on the screen, which is the host's own matcher not
+firing on a typed send, not the contract failing to arrive — recorded, not chased, and the tool says
+which of the two happened on every send.
+
+**The gates this round re-ran after the three fixes**, on the same machine and distro as the tables
+above: `bash-session-real` **72/72 on all four legs** (`src`/`lib` planes × `root`/`ruler` users — the
+count moved from 71 because the starve-reporting cell is new), `tool-bash-real` 10/10 and
+`bash-parity-real` 12/12 on both planes, unit 195 (194 pass, 1 skip), node bucket 85/85, win32 51/51,
+docs parity 11/11, profile isolation PASSED, typecheck 209 = baseline, `lint:portability` rc 0. The
+three cells that were red on the outside machine and the two this branch made red on the way are all
+green here: `alias, function, shopt and set options survive a restart` (answers `FN_OK_9`),
+`a function over the cap is named, and the others still come back` (names `dshhugefn(70025)`, keeps
+`SMALL_OK_6`), and `a rebuild triggered by a terminal wait reports what it could not restore` (the body
+of the call that asked for the terminal carries `not restored: functions dshhugefn2(70026)`).
+
+## Round twelve: the same gates run on both WSL kernels, and the note stops lying about the one it cannot read (2026-10-07)
+
+Issue #52 asked whether a kernel this machine does not have could be gated at all. It can: the
+`real-WSL hard gates` job is a matrix over `wslVersion: [1, 2]`, provisioned by `Vampire/setup-wsl` and
+pinned by the job's own step, so the same 73 cells run against a WSL1 Ubuntu-24.04 and a WSL2 one in
+every frame. Four frames were needed to get there, and each one taught something different.
+
+**Frame 37494104075 (`b4282f9`) — the arm was red because of the apparatus, not the product.** WSL1
+reached `39/46` and then stopped: after the six keyboard cells each burned the deadline they asked for
+(measured in that log: 23 721 ms, 23 668 ms, 20 664 ms, 23 717 ms, 63 716 ms), the **one** `AbortSignal`
+shared by the whole file at 180 000 ms expired, every later call threw `tool call aborted`, and 28 check
+sites went unreported. The new source-derived guard named them instead of reporting a number to trust.
+Two things followed: every call now gets its own budget from its own `timeoutMs` (the way the host gives
+each tool call its own cancellation), and the keyboard cells print the watchdog's reading rather than a
+`tail` of the body, which is what had left the question open for a round.
+
+**What the two kernels actually answer, and where each value was read.** The rows for the same two
+commands. Every WSL1 cell below is verbatim from the deadline bodies in `cii-1` / `cih-1`; on WSL2 a call
+that is *stopped* carries no reading clause at all (the rows are only printed when a call reaches its
+deadline), so that arm's read row comes from the 2026-10-05 measurement of the production session
+(`D:\Temp\issue51-s0\v1c-table.txt`) and the sleep row from the same frames' deadlines:
+
+| the call is | WSL1 (CI, Ubuntu-24.04 root) | WSL2 (same distro) |
+| --- | --- | --- |
+| `sh -c 'read x < /dev/tty'` | `shell:S w=not-reported 1tty bg; sh:S w=not-reported 1tty bg` | `sh:S+ w=wait_woken 1tty fg`, the fd reported as `/dev/tty` — measured 2026-10-05; its `sc=` value is **not** printed by any frame (see the note under this table) |
+| `sleep 3` | `shell:S w=not-reported 1tty bg; sleep:S w=not-reported 0tty bg` (frames 37494104075, 37502997936) | `shell:Ss w=do_wait sc=61 1tty bg; sleep:S+ w=hrtimer_nanosleep sc=230 0tty fg` (frame 37502997936, both planes) |
+
+The one number that is *inferred* rather than read: on x86-64 `read` is syscall `0`, so a WSL2 keyboard
+read would print `sc=0`. That mapping is supported by the two values CI does print — `61` is `wait4`,
+which is what a shell between commands is in, and `230` is `clock_nanosleep`, which is a `sleep` — but the
+read row itself has never been printed, because confirming the wait stops the call before any deadline
+body exists. Nothing in the rule depends on `sc=0`: the confirmed reading on WSL2 is `wchan` plus the
+terminal fd, and the syscall number is only ever a second witness where the name is missing.
+
+So on WSL1 `/proc/<pid>/wchan` and `/proc/<pid>/syscall` both come back **empty for every process,
+asleep or running**, no process reports itself as the terminal's foreground job, and the fd table does
+show a terminal for the process that opened one (`1tty`, and `2tty` for the shell reading it as a
+builtin) while a `sleep` shows none. That last column is the one remaining discriminator there is — see
+the open question at the end of this section.
+
+**The note was making a false statement, and the fix is in the rendering.** An empty `wchan` had one
+meaning in the parser ("the process was running"), which on WSL2 is right — state `R`, nowhere asleep —
+and on WSL1 printed `running` about a process plainly blocked on a terminal. `describeRows` now separates
+the three facts a blank field can stand for: `w=running` (state `R`), `w=not-reported` (asleep, and this
+kernel gives no location), `w=0` (a location this reader may not look inside, e.g. another user's
+`sudo`). The deadline clause names the fields it read, in the body the model sees:
+
+```
+[the check for a command waiting on a keyboard looked and read (/proc/<pid>/wchan, /proc/<pid>/syscall,
+ its fd table): shell:S w=not-reported 1tty bg; sh:S w=not-reported 1tty bg]
+```
+
+**The cells that assume a stop now branch on the kernel, and the branch is self-anchoring.** Six cells
+were written as though this machine's WSL were the rule. Each one asks the reading first — *did this
+kernel hand the tool anything a rule could act on* — and asserts accordingly: where it did, the call
+must be stopped early and announced (`branch:"reading-acts"`); where it did not, the call must reach its
+deadline **and** carry the reading it took (`branch:"reading-declares"`). A row counts as something to
+act on only when all three facts are present at once — the process is the terminal's foreground job, it
+is asleep in a *read* (the `wchan` name, or syscall number `0` where the kernel gives no name), and a
+terminal is among its descriptors. That is the same evidence set the product uses, re-read from the body
+rather than trusted from the code, so a kernel that starts reporting a wait reddens the cells that were
+blessing a deadline instead of staying quiet about it. `sleep 4` remains the false-kill control on both
+arms.
+
+**Frame 37498236233 (`0866946`) — a red of mine that pre-dated the WSL arms.** The artifact-plane job
+failed its own first step: `RED — lib/ in HEAD is not what a build of HEAD's src/ produces`. I had moved
+three `src/` files and left the committed bundle behind. Rebuilt (`npm run build`, 29 files, `verify-lib`
+OK) and committed as `2d34f06`, with the claim checked on the bytes rather than on the build log:
+`lib/wsl-bash-tool-DJwrYT5R.js` contains `not-reported` and the clause's own `its fd table`.
+
+**Frame 37498745955 (`2d34f06`) — 72/73 on WSL1, one cell left, and it was the cell that still assumed a
+stop.** `a rebuild triggered by a terminal wait reports what it could not restore` wanted the reason
+sentence of a *stopped* call (`waiting for a keyboard`), while a declared call says `waiting on a
+keyboard looked and read …`. The report half — `not restored: functions dshhugefn2(70026)` — arrived
+intact on both planes. `287f283` makes the trigger half follow `canAct`, and keeps requiring the loss
+report whichever trigger fired.
+
+**The tip's own green frame is 37506092966 (`ff626e6`)** — created 2026-10-06T17:46:07Z, finished
+17:59:13Z (北京时间 10-07 01:46:07 → 01:59:13), 13 分 06 秒. Two frames on this line were green before it —
+37500642619 (`287f283`, 17:04:05Z → 17:16:17Z) and 37502997936 (`59c083a`, 17:23Z → 17:34Z) — and each is
+cited where the value it printed is what a sentence rests on, because the tip's frame is not the source of
+every number quoted here:
+
+```
+gates on the committed artifact plane (ubuntu) :: success
+node buckets against the pinned host tree (ubuntu) :: success
+real-WSL hard gates (windows + WSL2 Ubuntu) :: success
+real-WSL hard gates (windows + WSL1 Ubuntu) :: success
+```
+
+and on both kernels, on both planes: `bash-session-real` **73/73** (76 sites, every one accounted for),
+`bash-parity-real` 12/12, `tool-bash-real` 10/10. The 9P fixture premise moved the way it was designed
+to: on WSL2's lib plane the share had gone away between passes and the driver logged
+`relay-real: the fixture share was not mounted; created-on-demand (DSH_MADE)` and passed, instead of
+dying with a `spawn node.exe ENOENT` about a binary that exists.
+
+**The same gates on this machine** (Ubuntu 22.04, WSL2, `ruler`): `bash-session-real` 73/73 on the `src`
+plane and 73/73 on the `lib` plane, `node --check` on both drivers, unit 186 tests (185 pass, 1 skip)
+with `check-unit-closure` OK over 17 bucket files, `typecheck-gate` 209 = baseline, `docs-parity` 11/11,
+`test:win32` 48/48. Those 48 are worth one sentence: in this scratch worktree `test:win32` first read
+46/48, and the two reds were the tree's own location — `os.tmpdir()` on this machine is `D:\Temp`, so the
+fs-policy fixture's "outside the workspace" directory sits *inside* the area the policy allows by design.
+With `TMP` pointed out of `D:\Temp` the same bucket is 48/48. Nothing in the branch was wrong; the gate's
+premise is "the checkout is not under the platform temp area", which holds on every CI runner.
+
+**The open question this round leaves for a decision, not for a cell.** WSL1 does report a terminal in
+the descriptors of a process that opened one, and does not for a `sleep`. A rule could therefore stop
+`asleep + no CPU + no bytes + a terminal among the descriptors` on that kernel too, at the unconfirmed
+window (1 500 ms) rather than the confirmed one, and a keyboard wait there would answer in about two
+seconds instead of its whole deadline — which today is 23 676 ms for a 20 000 ms ask, plus 11 683 ms for
+the 8 000 ms one. The cost is the class WSL1 cannot see into: any program that holds `/dev/tty` *while
+waiting on something else* — `ssh` partway through an authentication that is also polling its socket,
+`gpg` waiting on its agent — would be stopped after 1.5 s of silence, on a kernel that cannot show it is
+not reading the keyboard. That is a guess about a process the tool is going to kill, so it is not
+implemented here, and the body says what it saw instead. Flipping it later is one rule branch plus these
+six cells moving from `reading-declares` back to `reading-acts`; nothing about the protocol changes.
+
+**What this round does not claim.** Whether WSL1 answers `tpgid` as `-1` or simply as a different number
+is not settled — both spellings render distinctly now (`no-tpgid` / `bg`), and every WSL1 row read this
+frame printed `bg` for processes that were in fact foreground, which is itself the finding. The
+`1tty` column above is measured from the deadline clause of real calls, not from a probe driven by hand.
+Nothing here was re-run on his Desktop, and the eleven-release matrix has not been re-run on this tip.

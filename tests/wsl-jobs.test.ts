@@ -77,8 +77,10 @@ test('registers one bash_background tool with a narrow schema', () => {
   assert.deepEqual([...registered.keys()], [TOOL_NAME])
   assert.deepEqual(tool.parameters.required, ['command'])
   assert.deepEqual(Object.keys(tool.parameters.properties), ['command', 'workdir'])
-  assert.equal(tool.description.includes('no `run_in_background` parameter'), true,
-    'it says why it exists instead of pretending to be the one-shot tool')
+  assert.equal(tool.description.includes('same producer'), true,
+    'it says it is the producer `bash`’s run_in_background delegates to, not a rival registry')
+  assert.equal(tool.description.includes('does not see a `cd` or `export`'), true,
+    'and it says the job runs in its own process, so a session `cd` is not inherited')
   assert.equal(tool.timeoutMs, CONFIG.timeoutMs)
 })
 
@@ -124,6 +126,16 @@ test('the producer runs through this world\u2019s shell, with the caller\u2019s 
   assert.equal(calls.resolved[0].command, 'pwd')
   assert.equal(calls.resolved[0].workdir, '/tmp')
   assert.deepEqual(calls.resolved[0].dshEnv, { DSH_SESSION_ID: 's' }, 'managed DSH_* facts ride along')
+  // The shell executor honours `timeoutMs` unless the spec says otherwise
+  // (`src/shell.ts`'s `spawnExecution` arms a deadline for every policy but
+  // `'none'`). Before issue #51 the background path ignored timeouts entirely;
+  // this is the fact that replaces that behaviour, so a dropped `'none'` would
+  // kill every `job_*` at the executor's 120 s foreground timeout.
+  // Read through a cast rather than `resolved[0].onExpiry`: the harness types
+  // `resolved` as an empty array literal, so a plain access would add a 211th
+  // typecheck error to a file that already carries 38 of the baseline's own.
+  const [firstRequest] = calls.resolved as Array<{ onExpiry?: string }>
+  assert.equal(firstRequest?.onExpiry, 'none', 'a job outlives one command timeout by policy, not accident')
   assert.equal(calls.started_.length, 1, 'run() starts exactly one process')
 })
 

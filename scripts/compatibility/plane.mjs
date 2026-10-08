@@ -41,6 +41,9 @@ const LOCATIONS = {
   fs: { src: 'src/fs.ts', lib: 'lib/fs.js' },
   search: { src: 'src/host/wsl-search.ts', lib: 'lib/wsl-search.js' },
   relay: { src: 'src/host/wsl-relay.ts', lib: 'lib/wsl-relay.js' },
+  shell: { src: 'src/shell.ts', lib: 'lib/shell.js' },
+  'wsl-bash-tool': { src: 'src/host/wsl-bash-tool.ts', lib: 'lib/wsl-bash-tool.js' },
+  'wsl-terminal-tool': { src: 'src/host/wsl-terminal-tool.ts', lib: 'lib/wsl-terminal-tool.js' },
   skills: { src: 'src/host/wsl-skills.ts', lib: null },
 }
 

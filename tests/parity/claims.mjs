@@ -220,10 +220,21 @@ function numberClaim({ id, file, name, zh, en, label, not_applicable_without }) 
  * They come back the moment their subject exists, and because they are listed by subject rather
  * than by name, that resumption needs no edit here.
  */
-const BASELINE_ABSENT = new Set([
-  'src/shared/wsl-stdin.ts',
-  'src/host/wsl-bash-tool.ts',
-])
+/**
+ * Subjects absent from the baseline these claims were written against, so evaluating them would
+ * compare nothing.
+ *
+ * **Empty on this branch, and that is the point.** #51 brings both `src/shared/wsl-stdin.ts` and
+ * `src/host/wsl-bash-tool.ts` into existence, which is exactly what this list was for: a claim whose
+ * subject is absent is reported as *not applicable* rather than silently green, and comes back on its
+ * own once the file lands — because the entries are keyed by subject, not by claim name.
+ *
+ * Both names were removed here rather than left behind. Leaving a subject that now exists asserts
+ * two contradictory things about it — comparable and incomparable — and `docs-debt` refuses the
+ * combination by name. Removing them puts the claims back under evaluation, which is the honest
+ * state: from here they are green or red on what the code and the panel actually say.
+ */
+const BASELINE_ABSENT = new Set()
 
 /** Watched constants whose subject file is present on this baseline. */
 export const APPLICABLE_WATCHED_CONSTANTS = WATCHED_CONSTANTS.filter(([file]) => subjectExists(file))
@@ -308,18 +319,10 @@ export const CLAIMS = [
   defineClaim({
     id: 'panel-names-every-registered-tool',
     issue: '#52',
-    // Filed rather than fixed. The panel genuinely omits a tool the registry exposes, and **filing it is
-    // what the gate is for** — a gate that can only fail cannot be merged into a branch that still
-    // has the defect. The repair belongs to whoever next edits the help text, and withdrawing this
-    // entry has to happen in the same commit that fixes the panel, or the arithmetic reports the
-    // discrepancy instead of forgetting it.
-    debt: {
-      owed: 'The panel omits a tool the repository registers. `registeredToolNames()` is derived, and '
-        + 'one tool it returns has no name in either dictionary — reachable by the model, '
-        + 'undiscernible by the user.',
-      repair: 'Name it in both dictionaries. The claim re-derives the tool list rather than holding a '
-        + 'written copy, so it goes green when the panel agrees and red again when they drift.',
-    },
+    // Debt withdrawn, paid by #51: the panel now names every tool the registry derives
+    // (`bash`, `bash_background`, `glob`, `grep`, `wsl_terminal`) in both dictionaries. The claim
+    // re-derives the list rather than holding a written copy, so it stays the thing that notices the
+    // next rename — that is why it could be retired without replacing it.
     async run() {
       const tools = registeredToolNames()
       if (tools.length < 4) {
@@ -349,18 +352,15 @@ export const CLAIMS = [
     // observation — and an absence claim cannot tell those apart. Red would be a false accusation;
     // green would be a false green.
     not_applicable_without: 'src/host/wsl-bash-tool.ts',
-    // Filed rather than fixed: the panel still says PTY where the code now defaults to the session
-    // shell. The claim reads the code's own answer rather than a recorded one, which is why it can
-    // be filed before the text is corrected and still mean something afterwards.
-    debt: {
-      owed: '`src/client/locales.ts` describes `bash` as backed by a PTY shell, while the '
-        + 'session-shell contract this gate derives says the default is the pipe-driven session '
-        + 'shell, with PTY reachable only behind an opt-in variable. The panel documents the tier that '
-        + 'is off by default.',
-      repair: 'Describe the default tier and name the variable that switches it. The claim reads the '
-        + 'contract from source, so it stops being red when the sentence matches the code — and turns '
-        + 'red again if they drift apart later.',
-    },
+    // Debt withdrawn, paid by #51 — and this one is worth a sentence, because it went green the
+    // *opposite* way from what the entry expected. The claim asserted that the panel said "PTY" where
+    // the code defaults to the session shell: that was true on the baseline, so the debt was real and
+    // the text was wrong. #51 made PTY the actual default, so the sentence is now **correct** — the
+    // panel stopped being wrong by the code catching up, not by anyone editing the help text.
+    //
+    // A debt retired that way is still a retirement, and is still recorded here: withdrawing the entry
+    // is what makes the arithmetic stop reporting it. The claim itself stays in place, because the
+    // panel and the contract can drift apart again, and this is the line that notices.
     // This claim asserts an *absence*, so it needs the sentence that carries the claim to still be
     // there: with the whole usage paragraph deleted it would find no offending sentence and report
     // success about a panel that says nothing at all.

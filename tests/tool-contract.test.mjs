@@ -51,18 +51,18 @@ const READ_BY_THE_HOST = {
  * `premise` states the invariant and must not name an issue; `validateLedger` refuses one that does.
  */
 const DECLARED = [
-  {
-    id: 'a-description-instructs-a-parameter-the-schema-rejects',
-    premise: 'every parameter a description tells the model to pass is one the schema accepts',
-    match: value => value.some(entry => entry.tool === 'bash_background' && entry.instructed === 'run_in_background'),
-    owed: '`src/host/wsl-jobs.ts`: the `bash_background` description tells the model to pass '
-      + '`run_in_background`, and that tool\'s schema does not accept it. The sentence is a '
-      + 'cross-reference to `bash`\'s parameter, so whether it reads as an instruction at all '
-      + '**depends on the wording** — which is the fragile part, and is stated here rather than left '
-      + 'to be discovered when the sentence is reworded.',
-    repair: 'Either say it without naming the parameter, or accept the parameter. What must not '
-      + 'remain is a sentence that reads to the model as an instruction the schema rejects.',
-  },
+  // Withdrawn, with the debt paid: `a-description-instructs-a-parameter-the-schema-rejects`.
+  //
+  // `bash_background`'s description used to read "... the same producer the `bash` tool's
+  // `run_in_background: true` argument uses" — a cross-reference whose reading as an *instruction*
+  // depended on the wording, which is what the entry said was fragile about it. #51 rewrote the
+  // sentence so it names both sides explicitly: "so a job started either way appears in `job_list`".
+  // The extractor already discounts a named parameter that belongs to another tool, and the sentence
+  // now makes the reference unavoidable to read as anything else.
+  //
+  // No entry replaces it. The premise it stood for is now the only thing asserted about this
+  // property, and `every parameter the description instructs is one the schema accepts` enforces it
+  // with no exemption to bypass — which is the stronger position than a declared red ever was.
 ]
 
 function validateLedger(ledger = DECLARED) {
